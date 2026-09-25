@@ -1,6 +1,6 @@
 # StaleDocs CLI reference
 
-This is the complete command catalogue for the `0.3.0-beta.1` release candidate.
+This is the complete command catalogue for the published `0.4.0-beta.1` beta.
 The executable is `staledocs`. For provider credentials, subscription and API
 billing boundaries, repository safety details, and current caveats, see the
 [Public Beta guide](./PUBLIC_BETA.md), [Limitations](./LIMITATIONS.md), and
@@ -108,7 +108,7 @@ header is retained while the new entry is inserted after it.
 ```bash
 staledocs changelog
 staledocs changelog --from v0.3.0-beta.1 --to HEAD
-staledocs changelog --version 0.3.0-beta.1
+staledocs changelog --version 0.4.0-beta.1
 staledocs changelog --output docs/CHANGELOG.md
 staledocs changelog --dry-run --yes --strict-output
 staledocs changelog --mock
@@ -167,10 +167,11 @@ Options:
 
 Creates a deterministic AST-backed documentation-impact plan from Git changes.
 It does not construct a provider, call a model, or write a file. Human output
-is intended for review. Public symbols are exported functions (including
-`export const f = () => ...` and `export default`), classes and their public
-methods, interfaces, type aliases, enums, and exported constants. JSON output
-is a versioned `aidoc.impact-plan.v1` success or error envelope.
+is intended for review. TypeScript and JavaScript symbols are public when they
+are reachable from a discovered or configured package entry. JSON output is a
+versioned `aidoc.impact-plan.v1` success or error envelope with optional
+`boundary`, `visibility`, `summary.internalChanges`, and
+`ignored.documentationLimitReached` fields.
 
 ```bash
 staledocs plan
@@ -196,15 +197,18 @@ Options:
   `total` parameter counts for the head signature, or the base signature when the
   symbol was removed. A contract change is marked `potentially-breaking` when
   required arity increases or total arity decreases; otherwise it remains
-  `review-required`.
+  `review-required`. Set `entry` to an array of repository-relative package entry
+  files to override `package.json` discovery. Set `docs` to an array of additional
+  repository-relative Markdown files or directories to include in documentation
+  discovery. Neither field accepts an absolute path or `..` traversal.
 
 The first commit is compared with Git's empty tree. A shallow repository must
 contain the selected base. A supported source file that cannot be parsed stops
 the plan before provider construction or a document write.
 
-Limitations: Python module-level constants are not enumerated. Re-exports from
-other modules (`export * from`, `export { x } from`) and CommonJS
-`module.exports` are not enumerated.
+Limitations: Python module-level constants and CommonJS `module.exports` are not
+enumerated. Static relative `export ... from` declarations are followed within
+the bounded public boundary described in [LIMITATIONS.md](./LIMITATIONS.md).
 
 ### `staledocs update`
 
@@ -333,8 +337,14 @@ Options:
 - `--max-symbols <n>` limits the text or Markdown change list, defaulting to 30. JSON is never truncated.
 
 Markdown output starts with `<!-- staledocs-review -->`, followed by before and after
-signatures, affected documentation sections, and co-changed documents. A clean
-review has exactly the marker, heading, and `No public API changes in this pull request.`
+signatures, affected documentation sections, and co-changed documents. When no public
+API change is found but files could not be analyzed, the zero message names up to five
+of those files and says that no public API changes were found in the analyzed files.
+JSON keeps schema `aidoc.review.v1` and adds the optional `notAnalyzed` array. Each
+entry contains a repository-relative `path` and a bounded reason. Text and Markdown
+outputs include the same not-analyzed information.
+
+Review categories are `added`, `now exported`, `removed`, `no longer exported`, `moved`, and changed contract facets. `members` alone is rendered as `members changed`. `no longer exported` is potentially breaking; `now exported` is informational.
 
 ### `.staledocsignore`
 
@@ -361,10 +371,12 @@ StaleDocs also provides a pre-commit hook for the Python pre-commit ecosystem:
 ```yaml
 repos:
   - repo: https://github.com/mr-min-max/staledocs
-    rev: v0.3.0-beta.1
+    rev: v0.4.0-beta.1
     hooks:
       - id: staledocs-check
 ```
+
+The immutable hook pin and moving `v0` tag both resolve to the published `0.4.0-beta.1` release.
 
 The hook runs `staledocs check --since HEAD` on `pre-push`. It does not pass filenames.
 Install Node.js and `staledocs` before enabling it.

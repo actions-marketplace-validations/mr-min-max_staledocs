@@ -119,6 +119,7 @@ export interface SnapshotFileChange {
   afterSource?: string;
   supported: boolean;
   excluded: boolean;
+  analysis?: "commonjs" | "unsupported";
 }
 export interface GitSnapshotSet {
   root: string;
@@ -131,6 +132,9 @@ export interface GitSnapshotSet {
 /** Reads bounded Git/worktree snapshots and captures source text for planning. */
 export class GitSnapshotReader {
   private repositoryRoot?: string;
+  private baseCommit?: string;
+  private headCommit?: string;
+  private headUsesWorkingTree = false;
 
   constructor(
     private readonly cwd: string,
@@ -159,6 +163,9 @@ export class GitSnapshotReader {
     if (!baseLabel) baseLabel = await this.discoverBase(headCommit);
     const baseCommit = await this.resolveBase(baseLabel);
     const immutable = options.head !== undefined;
+    this.baseCommit = baseCommit;
+    this.headCommit = headCommit;
+    this.headUsesWorkingTree = !immutable;
     const changes = immutable
       ? await this.committedDiff(baseCommit, headCommit)
       : await this.workingDiff(baseCommit);
@@ -209,6 +216,9 @@ export class GitSnapshotReader {
             excluded:
               (before.supported && !before.inScope) ||
               (after.supported && !after.inScope),
+            ...(!before.supported && !after.supported
+              ? { analysis: "unsupported" as const }
+              : {}),
           });
           continue;
         }
@@ -221,6 +231,7 @@ export class GitSnapshotReader {
             ...effectiveChange,
             supported: endpoint.supported,
             excluded: endpoint.supported,
+            ...(endpoint.supported ? {} : { analysis: "unsupported" as const }),
           });
           continue;
         }
@@ -255,6 +266,166 @@ export class GitSnapshotReader {
       files,
       ignored: { unsupported, excluded },
     };
+  }
+
+  /** Reads a repository file at the base commit, head commit, or working tree. */
+  async readAt(
+    revision: "base" | "head",
+    path: string,
+  ): Promise<string | undefined> {
+    const normalized = normalizePath(path);
+    const root = this.repositoryRoot;
+    const commit = revision === "base" ? this.baseCommit : this.headCommit;
+    if (
+      normalized === undefined ||
+      root === undefined ||
+      commit === undefined
+    ) {
+      throw new PlanFailure(
+        "PLAN_SOURCE_READ_FAILED",
+        "Unable to read repository source.",
+      );
+    }
+    if (revision === "head" && this.headUsesWorkingTree) {
+      try {
+        return await this.worktreeFile(root, normalized);
+      } catch (error) {
+        if (
+          error instanceof PlanFailure &&
+          error.code === "PLAN_UNSAFE_WORKTREE_PATH"
+        ) {
+          try {
+            await fs.lstat(resolve(root, normalized));
+          } catch (statError) {
+            if (
+              typeof statError === "object" &&
+              statError !== null &&
+              "code" in statError &&
+              statError.code === "ENOENT"
+            ) {
+              return undefined;
+            }
+          }
+        }
+        throw error;
+      }
+    }
+    return this.optionalBlob(commit, normalized);
+  }
+
+  /** Lists bounded package manifests at an immutable or working-tree revision. */
+  async listPackageManifests(
+    revision: "base" | "head",
+    limit = 50,
+  ): Promise<string[]> {
+    const commit = revision === "base" ? this.baseCommit : this.headCommit;
+    if (commit === undefined || !Number.isSafeInteger(limit)) {
+      throw new PlanFailure(
+        "PLAN_SOURCE_READ_FAILED",
+        "Unable to read repository snapshot.",
+      );
+    }
+    if (limit <= 0) return [];
+    try {
+      const output =
+        revision === "head" && this.headUsesWorkingTree
+          ? (
+              await Promise.all([
+                this.run(["ls-files", "-z", "--"]),
+                this.run([
+                  "ls-files",
+                  "--others",
+                  "--exclude-standard",
+                  "-z",
+                  "--",
+                ]),
+              ])
+            ).join("")
+          : await this.run([
+              "ls-tree",
+              "-r",
+              "--name-only",
+              "-z",
+              commit,
+              "--",
+            ]);
+      return [...new Set(parseNulPaths(output))]
+        .map(normalizePath)
+        .filter((candidate): candidate is string => candidate !== undefined)
+        .filter((candidate) => {
+          const parts = candidate.split("/");
+          return (
+            posix.basename(candidate) === "package.json" &&
+            !parts.some((part) =>
+              ["node_modules", "dist", "build"].includes(part),
+            )
+          );
+        })
+        .sort()
+        .slice(0, limit);
+    } catch {
+      throw new PlanFailure(
+        "PLAN_SOURCE_READ_FAILED",
+        "Unable to read repository snapshot.",
+      );
+    }
+  }
+
+  /** Lists package initializers, capped before boundary selection. */
+  async listPythonPackageEntries(
+    revision: "base" | "head",
+    limit = 21,
+  ): Promise<string[]> {
+    const commit = revision === "base" ? this.baseCommit : this.headCommit;
+    if (commit === undefined || !Number.isSafeInteger(limit)) {
+      throw new PlanFailure(
+        "PLAN_SOURCE_READ_FAILED",
+        "Unable to read repository snapshot.",
+      );
+    }
+    if (limit <= 0) return [];
+    try {
+      const output =
+        revision === "head" && this.headUsesWorkingTree
+          ? (
+              await Promise.all([
+                this.run(["ls-files", "-z", "--"]),
+                this.run([
+                  "ls-files",
+                  "--others",
+                  "--exclude-standard",
+                  "-z",
+                  "--",
+                ]),
+              ])
+            ).join("")
+          : await this.run([
+              "ls-tree",
+              "-r",
+              "--name-only",
+              "-z",
+              commit,
+              "--",
+            ]);
+      return [...new Set(parseNulPaths(output))]
+        .map(normalizePath)
+        .filter((candidate): candidate is string => candidate !== undefined)
+        .filter((candidate) => {
+          const parts = candidate.split("/");
+          return (
+            parts[parts.length - 1] === "__init__.py" &&
+            parts.length >= 2 &&
+            parts.length <= 4
+          );
+        })
+        .sort()
+        .slice(0, limit);
+    } catch {
+      throw new PlanFailure(
+        "PLAN_SOURCE_READ_FAILED",
+        "Unable to read repository snapshot.",
+      );
+    }
   }
 
   private async gitRoot(): Promise<string> {
@@ -404,7 +575,7 @@ export class GitSnapshotReader {
   ): Promise<
     Omit<
       SnapshotFileChange,
-      "supported" | "excluded" | "beforeSource" | "afterSource"
+      "supported" | "excluded" | "analysis" | "beforeSource" | "afterSource"
     >[]
   > {
     try {
@@ -432,7 +603,7 @@ export class GitSnapshotReader {
   ): Promise<
     Omit<
       SnapshotFileChange,
-      "supported" | "excluded" | "beforeSource" | "afterSource"
+      "supported" | "excluded" | "analysis" | "beforeSource" | "afterSource"
     >[]
   > {
     try {
@@ -460,6 +631,25 @@ export class GitSnapshotReader {
         "Unable to read repository source.",
         path,
       );
+    }
+  }
+  private async optionalBlob(
+    commit: string,
+    path: string,
+  ): Promise<string | undefined> {
+    try {
+      return await this.run(["show", `${commit}:${path}`, "--"]);
+    } catch {
+      try {
+        await this.run(["cat-file", "-e", `${commit}^{tree}`]);
+        return undefined;
+      } catch {
+        throw new PlanFailure(
+          "PLAN_SOURCE_READ_FAILED",
+          "Unable to read repository source.",
+          path,
+        );
+      }
     }
   }
   private async worktreeFile(root: string, path: string): Promise<string> {
@@ -513,7 +703,7 @@ function classifyPath(
   path: string,
   options: { include: string[]; exclude: string[] },
 ): { supported: boolean; inScope: boolean } {
-  const supported = /\.(?:ts|tsx|js|jsx|py)$/u.test(path);
+  const supported = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/u.test(path);
   return {
     supported,
     inScope:
@@ -584,12 +774,12 @@ function parseStatus(
   output: string,
 ): Omit<
   SnapshotFileChange,
-  "supported" | "excluded" | "beforeSource" | "afterSource"
+  "supported" | "excluded" | "analysis" | "beforeSource" | "afterSource"
 >[] {
   const tokens = parseNulTokens(output);
   const result: Omit<
     SnapshotFileChange,
-    "supported" | "excluded" | "beforeSource" | "afterSource"
+    "supported" | "excluded" | "analysis" | "beforeSource" | "afterSource"
   >[] = [];
   for (let i = 0; i < tokens.length; ) {
     const token = tokens[i++];

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { listProviders } from "../providers/registry";
 import { getProviderProfile } from "../providers/profiles";
 import { TRUST_POLICIES } from "../security/types";
+import { isSafePlanningPath } from "./planning";
 
 export const ConfigSchema = z.object({
   provider: z
@@ -36,7 +37,17 @@ export const ConfigSchema = z.object({
   ollamaHost: z.string().default("http://localhost:11434"),
   include: z
     .array(z.string())
-    .default(["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py"]),
+    .default([
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.mts",
+      "**/*.cts",
+      "**/*.js",
+      "**/*.jsx",
+      "**/*.mjs",
+      "**/*.cjs",
+      "**/*.py",
+    ]),
   exclude: z
     .array(z.string())
     .default([
@@ -51,6 +62,12 @@ export const ConfigSchema = z.object({
       "**/package-lock.json",
       "**/yarn.lock",
     ]),
+  entry: z.array(z.string().refine(isSafePlanningPath)).min(1).optional(),
+  docs: z
+    .array(z.string().refine(isSafePlanningPath))
+    .min(1)
+    .max(100)
+    .optional(),
   language: z.string().default("en"),
   outputDir: z.string().default("./docs"),
   maxContextBytes: z.number().int().min(1024).max(1048576).default(12000),

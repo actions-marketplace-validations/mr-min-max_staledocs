@@ -18,6 +18,7 @@ import {
   ParameterDeclaration,
   FileSystemRefreshResult,
   SyntaxKind,
+  ScriptKind,
   TypeAliasDeclaration,
   VariableDeclaration,
 } from "ts-morph";
@@ -25,6 +26,7 @@ import { sha256Hex } from "../impact/canonical";
 import {
   ContractFacet,
   ParserModuleSnapshot,
+  ReexportEdge,
   ParserSymbolSnapshot,
   SymbolKind,
 } from "../impact/types";
@@ -48,7 +50,16 @@ let sharedProject: Project | null = null;
 /** Parses TypeScript and JavaScript files using ts-morph AST metadata. */
 export class TypeScriptParser implements LanguageParser {
   readonly name = "typescript";
-  readonly supportedExtensions = [".ts", ".tsx", ".js", ".jsx"];
+  readonly supportedExtensions = [
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+  ];
 
   /** Visible for tests: how many times the Project has been constructed. */
   static sharedProjectCount = 0;
@@ -94,7 +105,9 @@ export class TypeScriptParser implements LanguageParser {
       skipAddingFilesFromTsConfig: true,
       compilerOptions: { allowJs: true, allowNonTsExtensions: true },
     });
-    const sourceFile = project.createSourceFile(filePath, source);
+    const sourceFile = project.createSourceFile(filePath, source, {
+      scriptKind: /\.(?:mjs|cjs)$/iu.test(filePath) ? ScriptKind.JS : undefined,
+    });
     this.assertNoSyntacticDiagnostics(project, sourceFile);
 
     return this.extractParsedModule(filePath, sourceFile);
@@ -110,7 +123,10 @@ export class TypeScriptParser implements LanguageParser {
       skipAddingFilesFromTsConfig: true,
       compilerOptions: { allowJs: true, allowNonTsExtensions: true },
     });
-    const sourceFile = project.createSourceFile(filePath, source);
+    const sourceFile = project.createSourceFile(filePath, source, {
+      scriptKind: /\.(?:mjs|cjs)$/iu.test(filePath) ? ScriptKind.JS : undefined,
+    });
+    const moduleSystem = detectModuleSystem(sourceFile);
     const diagnostics = project
       .getProgram()
       .getSyntacticDiagnostics(sourceFile);
@@ -134,7 +150,16 @@ export class TypeScriptParser implements LanguageParser {
             .map((specifier) => normalizeAst(specifier)),
         ]),
       ),
-      symbols: extractSnapshotSymbols(sourceFile),
+      symbols:
+        moduleSystem === "commonjs" && isJavaScriptModulePath(filePath)
+          ? []
+          : extractSnapshotSymbols(sourceFile),
+      reexports: extractReexports(sourceFile),
+      exports:
+        moduleSystem === "commonjs" && isJavaScriptModulePath(filePath)
+          ? []
+          : extractExportNames(sourceFile),
+      moduleSystem,
     };
   }
 
@@ -354,7 +379,105 @@ export class TypeScriptParser implements LanguageParser {
     }));
   }
 }
+function detectModuleSystem(
+  sourceFile: SourceFile,
+): NonNullable<ParserModuleSnapshot["moduleSystem"]> {
+  if (
+    sourceFile.getImportDeclarations().length > 0 ||
+    sourceFile.getExportDeclarations().length > 0 ||
+    sourceFile.getExportAssignments().length > 0 ||
+    sourceFile.getExportedDeclarations().size > 0
+  ) {
+    return "esm";
+  }
+  for (const statement of sourceFile.getStatements()) {
+    if (!Node.isExpressionStatement(statement)) continue;
+    if (isCommonJsExpression(statement.getExpression())) return "commonjs";
+    const expression = unwrapParentheses(statement.getExpression());
+    if (!Node.isCallExpression(expression)) continue;
+    const callee = unwrapParentheses(expression.getExpression());
+    if (!Node.isArrowFunction(callee) && !Node.isFunctionExpression(callee)) {
+      continue;
+    }
+    const body = callee.getBody();
+    if (!Node.isBlock(body)) continue;
+    if (
+      body
+        .getStatements()
+        .some(
+          (nested) =>
+            Node.isExpressionStatement(nested) &&
+            isCommonJsExpression(nested.getExpression()),
+        )
+    ) {
+      return "commonjs";
+    }
+  }
+  return "none";
+}
 
+function isCommonJsExpression(expression: Node): boolean {
+  const candidate = unwrapParentheses(expression);
+  if (Node.isBinaryExpression(candidate)) {
+    return (
+      candidate.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
+      isCommonJsAssignmentTarget(candidate.getLeft())
+    );
+  }
+  if (!Node.isCallExpression(candidate)) return false;
+  const callee = unwrapParentheses(candidate.getExpression());
+  if (
+    !Node.isPropertyAccessExpression(callee) ||
+    callee.getName() !== "defineProperty" ||
+    !Node.isIdentifier(callee.getExpression()) ||
+    callee.getExpression().getText() !== "Object"
+  ) {
+    return false;
+  }
+  const target = candidate.getArguments()[0];
+  return target !== undefined && isCommonJsExportObject(target);
+}
+
+function isCommonJsAssignmentTarget(expression: Node): boolean {
+  const candidate = unwrapParentheses(expression);
+  if (!Node.isPropertyAccessExpression(candidate)) return false;
+  const owner = candidate.getExpression();
+  return (
+    (Node.isIdentifier(owner) && owner.getText() === "exports") ||
+    isModuleExports(owner) ||
+    isModuleExports(candidate)
+  );
+}
+
+function isCommonJsExportObject(expression: Node): boolean {
+  const candidate = unwrapParentheses(expression);
+  return (
+    (Node.isIdentifier(candidate) && candidate.getText() === "exports") ||
+    isModuleExports(candidate)
+  );
+}
+
+function isModuleExports(expression: Node): boolean {
+  const candidate = unwrapParentheses(expression);
+  return (
+    Node.isPropertyAccessExpression(candidate) &&
+    candidate.getName() === "exports" &&
+    Node.isIdentifier(candidate.getExpression()) &&
+    candidate.getExpression().getText() === "module"
+  );
+}
+
+function unwrapParentheses(node: Node): Node {
+  let current = node;
+  while (Node.isParenthesizedExpression(current)) {
+    current = current.getExpression();
+  }
+  return current;
+}
+
+function isJavaScriptModulePath(filePath: string): boolean {
+  return /\.(?:js|jsx|mjs|cjs)$/iu.test(filePath);
+}
 type AstTuple = [kind: number, text: string | null, children: AstTuple[]];
 type CallableDeclaration =
   | FunctionDeclaration
@@ -367,6 +490,7 @@ interface ExportedBinding {
   declaration: Node;
   statement: Node;
   callable: boolean;
+  exportName: string;
 }
 function enumerateExports(sourceFile: SourceFile): ExportedBinding[] {
   const bindings: ExportedBinding[] = [];
@@ -407,6 +531,7 @@ function enumerateExports(sourceFile: SourceFile): ExportedBinding[] {
           ? (declaration.getName() ?? exportedName)
           : exportedName;
       bindings.push({
+        exportName: exportedName,
         exportedName: publicName,
         declaration:
           initializer !== undefined &&
@@ -422,6 +547,75 @@ function enumerateExports(sourceFile: SourceFile): ExportedBinding[] {
   return bindings.sort((left, right) =>
     compareText(left.exportedName, right.exportedName),
   );
+}
+
+function extractExportNames(
+  sourceFile: SourceFile,
+): { exported: string; symbol: string }[] {
+  return enumerateExports(sourceFile)
+    .map(({ exportName, exportedName }) => ({
+      exported: exportName,
+      symbol: exportedName,
+    }))
+    .filter(
+      (value, index, values) =>
+        index ===
+        values.findIndex(
+          (candidate) =>
+            candidate.exported === value.exported &&
+            candidate.symbol === value.symbol,
+        ),
+    )
+    .sort(
+      (left, right) =>
+        compareText(left.exported, right.exported) ||
+        compareText(left.symbol, right.symbol),
+    );
+}
+
+function extractReexports(sourceFile: SourceFile): ReexportEdge[] {
+  return sourceFile
+    .getExportDeclarations()
+    .flatMap((declaration): ReexportEdge[] => {
+      const specifier = declaration.getModuleSpecifierValue();
+      if (
+        specifier === undefined ||
+        (!specifier.startsWith("./") && !specifier.startsWith("../"))
+      ) {
+        return [];
+      }
+      const namespace = declaration.getNamespaceExport();
+      if (namespace !== undefined) {
+        return [
+          {
+            specifier,
+            names: [{ exported: namespace.getName(), local: "*" }],
+          },
+        ];
+      }
+      const named = declaration.getNamedExports();
+      if (named.length === 0) return [{ specifier }];
+      return [
+        {
+          specifier,
+          names: named
+            .map((element) => ({
+              exported: element.getAliasNode()?.getText() ?? element.getName(),
+              local: element.getName(),
+            }))
+            .sort(
+              (left, right) =>
+                compareText(left.exported, right.exported) ||
+                compareText(left.local, right.local),
+            ),
+        },
+      ];
+    })
+    .sort(
+      (left, right) =>
+        compareText(left.specifier, right.specifier) ||
+        compareText(JSON.stringify(left.names), JSON.stringify(right.names)),
+    );
 }
 function getDocDescription(node: Node): string | undefined {
   if (!Node.isJSDocable(node)) return undefined;

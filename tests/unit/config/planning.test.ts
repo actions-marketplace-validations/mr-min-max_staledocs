@@ -24,7 +24,7 @@ describe("planning configuration", () => {
   it("selects safe fields from a config without evaluating provider getters", async () => {
     await fs.writeFile(
       path.join(root, ".staledocsrc.cjs"),
-      `module.exports = { include: ["src/**"], exclude: ["src/vendor/**"], outputDir: "./api", maxContextBytes: 1024,
+      `module.exports = { include: ["src/**"], exclude: ["src/vendor/**"], entry: ["src/index.mts"], docs: ["handbook", "MIGRATION.md"], outputDir: "./api", maxContextBytes: 1024,
         get provider() { throw new Error("credential sentinel"); },
         get apiKey() { throw new Error("credential sentinel"); },
         get model() { throw new Error("credential sentinel"); },
@@ -36,6 +36,8 @@ describe("planning configuration", () => {
     expect(loadPlanningConfig(root)).toEqual({
       include: ["src/**"],
       exclude: ["src/vendor/**"],
+      entry: ["src/index.mts"],
+      docs: ["handbook", "MIGRATION.md"],
       outputDir: "./api",
       maxContextBytes: 1024,
     });
@@ -44,7 +46,17 @@ describe("planning configuration", () => {
   it("uses safe defaults and ignores provider environment variables", () => {
     const config = loadPlanningConfig(root);
     expect(config).toEqual({
-      include: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py"],
+      include: [
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.mts",
+        "**/*.cts",
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.mjs",
+        "**/*.cjs",
+        "**/*.py",
+      ],
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -121,6 +133,48 @@ describe("planning configuration", () => {
       outputDir: "./api",
       maxContextBytes: 12000,
     });
+  });
+
+  it("copies safe entry paths and rejects repository escapes", () => {
+    const source = ["src/index.ts"];
+    const config = parsePlanningConfig({ entry: source });
+    source.push("src/other.ts");
+
+    expect(config.entry).toEqual(["src/index.ts"]);
+    expect(ConfigSchema.parse({ entry: ["src/index.mts"] }).entry).toEqual([
+      "src/index.mts",
+    ]);
+    for (const entry of [[], [""], ["../index.ts"], ["/index.ts"]]) {
+      expect(() => parsePlanningConfig({ entry })).toThrow(
+        "invalid planning config",
+      );
+    }
+  });
+
+  it("copies safe docs paths and rejects repository escapes", () => {
+    const source = ["handbook", "MIGRATION.md"];
+    const config = parsePlanningConfig({ docs: source });
+    source.push("guides");
+
+    expect(config.docs).toEqual(["handbook", "MIGRATION.md"]);
+    expect(ConfigSchema.parse({ docs: ["handbook"] }).docs).toEqual([
+      "handbook",
+    ]);
+    for (const docs of [[], [""], ["../handbook"], ["/handbook"]]) {
+      expect(() => parsePlanningConfig({ docs })).toThrow(
+        "invalid planning config",
+      );
+      expect(() => ConfigSchema.parse({ docs })).toThrow();
+    }
+  });
+
+  it("bounds configured documentation lookups", () => {
+    const docs = Array.from({ length: 101 }, (_, index) => `docs/${index}`);
+
+    expect(() => parsePlanningConfig({ docs })).toThrow(
+      "invalid planning config",
+    );
+    expect(() => ConfigSchema.parse({ docs })).toThrow();
   });
 
   it("does not evaluate accessors in pure planning input", () => {

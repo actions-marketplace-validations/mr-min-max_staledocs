@@ -104,6 +104,50 @@ describe("TypeScriptParser", () => {
     expect(parser.supportedExtensions).toContain(".tsx");
     expect(parser.supportedExtensions).toContain(".js");
     expect(parser.supportedExtensions).toContain(".jsx");
+    expect(parser.supportedExtensions).toContain(".mts");
+    expect(parser.supportedExtensions).toContain(".cts");
+    expect(parser.supportedExtensions).toContain(".mjs");
+    expect(parser.supportedExtensions).toContain(".cjs");
+  });
+
+  it("detects ESM, CommonJS, and script module systems through the AST", async () => {
+    const commonjs = await parser.snapshot(
+      "lib/request.js",
+      "var req = {}; module.exports = req;",
+    );
+    const nestedCommonjs = await parser.snapshot(
+      "lib/nested.cjs",
+      "(() => { Object.defineProperty(module.exports, 'name', { value: true }); })();",
+    );
+    const propertyCommonjs = await parser.snapshot(
+      "lib/property.js",
+      "module.exports.request = request; exports.response = response;",
+    );
+    const esm = await parser.snapshot(
+      "src/index.js",
+      "export const api = true;",
+    );
+    const typesOnly = await parser.snapshot(
+      "src/types.ts",
+      "export interface Client { id: string; }",
+    );
+    const script = await parser.snapshot(
+      "scripts/build.js",
+      "const value = 1;",
+    );
+
+    expect(commonjs).toMatchObject({ moduleSystem: "commonjs", symbols: [] });
+    expect(nestedCommonjs).toMatchObject({
+      moduleSystem: "commonjs",
+      symbols: [],
+    });
+    expect(propertyCommonjs).toMatchObject({
+      moduleSystem: "commonjs",
+      symbols: [],
+    });
+    expect(esm.moduleSystem).toBe("esm");
+    expect(typesOnly.moduleSystem).toBe("esm");
+    expect(script.moduleSystem).toBe("none");
   });
 
   it("reuses a single Project instance across parses (performance)", async () => {
@@ -410,6 +454,39 @@ describe("TypeScriptParser", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("records sorted static relative reexports without bare specifiers", async () => {
+    const fixture = path.resolve(__dirname, "../../fixtures/barrel/index.ts");
+    const snapshot = await parser.snapshot(
+      fixture,
+      await fs.promises.readFile(fixture, "utf8"),
+    );
+    const plain = await parser.snapshot(
+      "src/plain.ts",
+      "export const plain = true;",
+    );
+
+    expect(snapshot.reexports).toEqual([
+      { specifier: "./core/a.js" },
+      {
+        specifier: "./core/b",
+        names: [
+          { exported: "DefaultThing", local: "default" },
+          { exported: "beta", local: "beta" },
+          { exported: "renamed", local: "original" },
+        ],
+      },
+      {
+        specifier: "./core/b",
+        names: [{ exported: "Shape", local: "Shape" }],
+      },
+      {
+        specifier: "./core/b",
+        names: [{ exported: "namespace", local: "*" }],
+      },
+    ]);
+    expect(plain.reexports).toEqual([]);
   });
 
   it("snapshots TSX arrow exports with a parameter contract facet", async () => {
@@ -1628,6 +1705,18 @@ export const VALUE = compute();`,
       language: "typescript",
       symbols: [{ kind: "function", qualifiedName: "View" }],
     });
+  });
+
+  it.each([
+    ["src/view.mts", "export function visible(): string { return 'ok'; }"],
+    ["src/view.cts", "export function visible(): string { return 'ok'; }"],
+    ["src/view.mjs", "export function visible() { return 'ok'; }"],
+    ["src/view.cjs", "export function visible() { return 'ok'; }"],
+  ])("snapshots modern module extension %s", async (filePath, source) => {
+    const snapshot = await parser.snapshot(filePath, source);
+    expect(snapshot.symbols).toEqual([
+      expect.objectContaining({ qualifiedName: "visible" }),
+    ]);
   });
 
   // Break caught: recovery ASTs cross the snapshot boundary or expose diagnostic details.

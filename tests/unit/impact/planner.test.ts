@@ -142,6 +142,360 @@ describe("createImpactPlan", () => {
     );
   });
 
+  test("discovers every root Markdown file with a deterministic thirty-file cap", async () => {
+    const root = repository();
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function rootApi(value: string) { return value; }\n",
+    );
+    for (let index = 30; index >= 0; index -= 1) {
+      writeFileSync(
+        join(root, `ROOT-${String(index).padStart(2, "0")}.md`),
+        `# Root ${index}\n\n\`rootApi\`\n`,
+      );
+    }
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function rootApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+    const files = result.plan.documentation.flatMap((impact) =>
+      impact.directReferences.map((reference) => reference.file),
+    );
+
+    expect(files).toHaveLength(30);
+    expect(files[0]).toBe("ROOT-00.md");
+    expect(files[29]).toBe("ROOT-29.md");
+    expect(files).not.toContain("ROOT-30.md");
+  });
+
+  test("discovers every built-in documentation directory and configured output", async () => {
+    const root = repository();
+    for (const directory of [
+      "docs",
+      "doc",
+      "documentation",
+      "guide",
+      "guides",
+      "generated-docs",
+    ]) {
+      mkdirSync(join(root, directory), { recursive: true });
+      writeFileSync(
+        join(root, directory, "API.md"),
+        `# ${directory}\n\n\`directoryApi\`\n`,
+      );
+    }
+    writeFileSync(
+      join(root, ".staledocsrc.json"),
+      JSON.stringify({ outputDir: "generated-docs" }),
+    );
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function directoryApi(value: string) { return value; }\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function directoryApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+    const files = result.plan.documentation.flatMap((impact) =>
+      impact.directReferences.map((reference) => reference.file),
+    );
+
+    expect(files).toEqual([
+      "doc/API.md",
+      "docs/API.md",
+      "documentation/API.md",
+      "generated-docs/API.md",
+      "guide/API.md",
+      "guides/API.md",
+    ]);
+  });
+
+  test("discovers non-recursive Markdown beside TypeScript and Python package roots", async () => {
+    const root = repository();
+    mkdirSync(join(root, "packages", "core", "src"), { recursive: true });
+    mkdirSync(join(root, "python_pkg"), { recursive: true });
+    mkdirSync(join(root, "python_pkg", "nested"), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ private: true, workspaces: ["packages/*"] }),
+    );
+    writeFileSync(
+      join(root, "packages", "core", "package.json"),
+      JSON.stringify({ name: "@x/core", main: "dist/index.js" }),
+    );
+    writeFileSync(
+      join(root, "packages", "core", "src", "index.ts"),
+      "export function coreApi(value: string) { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "packages", "core", "README.md"),
+      "# Core\n\n`coreApi`\n",
+    );
+    writeFileSync(
+      join(root, "packages", "core", "nested.md"),
+      "# Package notes\n\n`coreApi`\n",
+    );
+    mkdirSync(join(root, "packages", "core", "nested"));
+    writeFileSync(
+      join(root, "packages", "core", "nested", "ignored.md"),
+      "# Nested\n\n`coreApi`\n",
+    );
+    writeFileSync(
+      join(root, "pyproject.toml"),
+      '[project]\nname = "python-pkg"\n',
+    );
+    writeFileSync(
+      join(root, "python_pkg", "__init__.py"),
+      "from .core import python_api\n",
+    );
+    writeFileSync(
+      join(root, "python_pkg", "core.py"),
+      "def python_api(value: str) -> str:\n    return value\n",
+    );
+    writeFileSync(
+      join(root, "python_pkg", "README.md"),
+      "# Python\n\n`python_api`\n",
+    );
+    writeFileSync(
+      join(root, "python_pkg", "nested", "ignored.md"),
+      "# Nested\n\n`python_api`\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "packages", "core", "src", "index.ts"),
+      "export function coreApi(value: number) { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "python_pkg", "core.py"),
+      "def python_api(value: int) -> int:\n    return value\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+    const references = new Map(
+      result.plan.documentation.map((impact) => [
+        result.plan.changes.find((change) => change.id === impact.changeId)
+          ?.qualifiedName,
+        impact.directReferences.map((reference) => reference.file),
+      ]),
+    );
+
+    expect(references.get("coreApi")).toEqual([
+      "packages/core/README.md",
+      "packages/core/nested.md",
+    ]);
+    expect(references.get("python_api")).toEqual(["python_pkg/README.md"]);
+    expect(JSON.stringify(result.plan.documentation)).not.toContain(
+      "nested/ignored.md",
+    );
+  });
+
+  test("still recurses into a package directory scanned beside a manifest", async () => {
+    const root = repository();
+    mkdirSync(join(root, "packages", "core", "src"), { recursive: true });
+    mkdirSync(join(root, "packages", "core", "guide"), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ private: true, workspaces: ["packages/*"] }),
+    );
+    writeFileSync(
+      join(root, "packages", "core", "package.json"),
+      JSON.stringify({ name: "@x/core", main: "dist/index.js" }),
+    );
+    writeFileSync(
+      join(root, ".staledocsrc.json"),
+      JSON.stringify({ docs: ["packages"] }),
+    );
+    writeFileSync(
+      join(root, "packages", "core", "src", "index.ts"),
+      "export function nestedApi(value: string) { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "packages", "core", "README.md"),
+      "# Core\n\n`nestedApi`\n",
+    );
+    writeFileSync(
+      join(root, "packages", "core", "guide", "usage.md"),
+      "# Usage\n\n`nestedApi`\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "packages", "core", "src", "index.ts"),
+      "export function nestedApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(
+      result.plan.documentation.flatMap((impact) =>
+        impact.directReferences.map((reference) => reference.file),
+      ),
+    ).toEqual(["packages/core/README.md", "packages/core/guide/usage.md"]);
+  });
+
+  test("discovers safe configured documentation files and directories", async () => {
+    const root = repository();
+    mkdirSync(join(root, "handbook"));
+    writeFileSync(
+      join(root, ".staledocsrc.json"),
+      JSON.stringify({
+        docs: ["MIGRATION.md", "handbook", "handbook"],
+        exclude: ["handbook/private.md"],
+      }),
+    );
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function configuredApi(value: string) { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "MIGRATION.md"),
+      "# Migration\n\n`configuredApi`\n",
+    );
+    writeFileSync(
+      join(root, "handbook", "API.md"),
+      "# API\n\n`configuredApi`\n",
+    );
+    writeFileSync(
+      join(root, "handbook", "private.md"),
+      "# Private\n\n`configuredApi`\nPRIVATE_SENTINEL\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function configuredApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+    const serialized = JSON.stringify(result);
+
+    expect(
+      result.plan.documentation.flatMap((impact) =>
+        impact.directReferences.map((reference) => reference.file),
+      ),
+    ).toEqual(["MIGRATION.md", "handbook/API.md"]);
+    expect(serialized).not.toContain("handbook/private.md");
+    expect(serialized).not.toContain("PRIVATE_SENTINEL");
+  });
+
+  test("preserves configured documentation path casing", async () => {
+    const root = repository();
+    mkdirSync(join(root, "Handbook"));
+    writeFileSync(
+      join(root, ".staledocsrc.json"),
+      JSON.stringify({ docs: ["Handbook"] }),
+    );
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function caseApi(value: string) { return value; }\n",
+    );
+    writeFileSync(join(root, "Handbook", "API.md"), "# API\n\n`caseApi`\n");
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function caseApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(
+      result.plan.documentation.flatMap((impact) =>
+        impact.directReferences.map((reference) => reference.file),
+      ),
+    ).toEqual(["Handbook/API.md"]);
+  });
+
+  test("stops combined directory discovery after two thousand files", async () => {
+    const root = repository();
+    mkdirSync(join(root, "docs"));
+    writeFileSync(
+      join(root, ".staledocsrc.json"),
+      JSON.stringify({ exclude: ["docs/**"] }),
+    );
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function boundedApi(value: string) { return value; }\n",
+    );
+    for (let index = 2000; index >= 0; index -= 1) {
+      writeFileSync(
+        join(root, "docs", `${String(index).padStart(4, "0")}.md`),
+        "# Notes\n",
+      );
+    }
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function boundedApi(value: number) { return value; }\n",
+    );
+
+    const first = await createImpactPlan({ cwd: root });
+    const second = await createImpactPlan({ cwd: root });
+
+    expect(first.plan.ignored.documentationLimitReached).toBe(true);
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+  });
+
+  test("does not count non-Markdown files against the directory cap", async () => {
+    const root = repository();
+    mkdirSync(join(root, "documentation"));
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function walkApi(value: string) { return value; }\n",
+    );
+    for (let index = 0; index < 2000; index += 1) {
+      writeFileSync(
+        join(root, "documentation", `${String(index).padStart(4, "0")}.txt`),
+        "notes\n",
+      );
+    }
+    writeFileSync(
+      join(root, "documentation", "zzzz.md"),
+      "# API\n\n`walkApi`\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function walkApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.ignored.documentationLimitReached).toBeUndefined();
+    expect(
+      result.plan.documentation.flatMap((impact) =>
+        impact.directReferences.map((reference) => reference.file),
+      ),
+    ).toEqual(["documentation/zzzz.md"]);
+  });
+
+  test("reports the separate filesystem walk ceiling", async () => {
+    const root = repository();
+    mkdirSync(join(root, "guides"));
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function ceilingApi(value: string) { return value; }\n",
+    );
+    for (let index = 0; index < 10_001; index += 1) {
+      writeFileSync(
+        join(root, "guides", `${String(index).padStart(5, "0")}.txt`),
+        "notes\n",
+      );
+    }
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.ts"),
+      "export function ceilingApi(value: number) { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.ignored.documentationLimitReached).toBe(true);
+  });
+
   test("returns stable plans and scans only selected markdown files", async () => {
     const root = repository();
     mkdirSync(join(root, "docs"));
@@ -277,7 +631,9 @@ describe("createImpactPlan", () => {
 
   test("skips configured documentation reached through an intermediate external symlink", async () => {
     const root = repository();
-    const externalRoot = mkdtempSync(join(tmpdir(), "staledocs-external-docs-"));
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "staledocs-external-docs-"),
+    );
     mkdirSync(join(externalRoot, "sub"));
     writeFileSync(
       join(externalRoot, "sub", "API.md"),
@@ -311,7 +667,9 @@ describe("createImpactPlan", () => {
     const root = repository();
     const docs = join(root, "docs");
     const parkedDocs = join(root, "docs-before-swap");
-    const externalDocs = mkdtempSync(join(tmpdir(), "staledocs-external-swap-"));
+    const externalDocs = mkdtempSync(
+      join(tmpdir(), "staledocs-external-swap-"),
+    );
     const documentationPath = join(docs, "API.md");
     mkdirSync(docs);
     writeFileSync(documentationPath, "# Internal notes\nNo public API here.\n");
@@ -371,7 +729,9 @@ describe("createImpactPlan", () => {
     const root = repository();
     const docs = join(root, "docs");
     const parkedDocs = join(root, "docs-inside-repository");
-    const externalDocs = mkdtempSync(join(tmpdir(), "staledocs-coordinated-docs-"));
+    const externalDocs = mkdtempSync(
+      join(tmpdir(), "staledocs-coordinated-docs-"),
+    );
     const documentationPath = join(docs, "API.md");
     mkdirSync(docs);
     writeFileSync(documentationPath, "# Internal notes\nNo public API here.\n");
@@ -471,6 +831,9 @@ describe("createImpactPlan", () => {
     const readSpy = jest
       .spyOn(GitSnapshotReader.prototype, "read")
       .mockResolvedValue(snapshotSet);
+    const manifestsSpy = jest
+      .spyOn(GitSnapshotReader.prototype, "listPackageManifests")
+      .mockResolvedValue([]);
     const originalLstat = fs.lstat.bind(fs);
     const observedLengths: number[] = [];
     const lstatSpy = jest.spyOn(fs, "lstat").mockImplementation(((
@@ -489,6 +852,7 @@ describe("createImpactPlan", () => {
     } finally {
       lstatSpy.mockRestore();
       readSpy.mockRestore();
+      manifestsSpy.mockRestore();
     }
   });
 
@@ -667,6 +1031,109 @@ describe("createImpactPlan", () => {
     );
   });
 
+  test("reports changed non-enumerable CommonJS files as not analyzed", async () => {
+    const root = repository();
+    mkdirSync(join(root, "lib"));
+    writeFileSync(join(root, "package.json"), '{"main":"lib/index.js"}\n');
+    writeFileSync(
+      join(root, "lib", "index.js"),
+      "var api = {};\nmodule.exports = api;\n",
+    );
+    commit(root, "initial");
+    writeFileSync(join(root, "marker.txt"), "baseline\n");
+    commit(root, "baseline");
+    writeFileSync(
+      join(root, "lib", "index.js"),
+      "var api = { fresh: true };\nmodule.exports = api;\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.changes).toEqual([]);
+    expect(result.plan.ignored.notAnalyzed).toEqual([
+      { path: "lib/index.js", reason: "commonjs" },
+    ]);
+  });
+
+  test("sorts and caps unsupported not-analyzed files at fifty", async () => {
+    const root = repository();
+    mkdirSync(join(root, "unsupported"));
+    for (let index = 51; index >= 0; index -= 1) {
+      writeFileSync(
+        join(root, "unsupported", `${String(index).padStart(2, "0")}.txt`),
+        "before\n",
+      );
+    }
+    commit(root, "initial");
+    for (let index = 51; index >= 0; index -= 1) {
+      writeFileSync(
+        join(root, "unsupported", `${String(index).padStart(2, "0")}.txt`),
+        "after\n",
+      );
+    }
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.ignored.notAnalyzed).toHaveLength(50);
+    expect(result.plan.ignored.notAnalyzed?.[0]?.path).toBe(
+      "unsupported/00.txt",
+    );
+    expect(result.plan.ignored.notAnalyzed?.[49]?.path).toBe(
+      "unsupported/49.txt",
+    );
+  });
+
+  // Break caught: changed Markdown documentation is analyzed for documentation
+  // impact, so naming it "not analyzed" contradicts the same report.
+  test("never reports changed Markdown documentation as not analyzed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "staledocs-planner-md-"));
+    const snapshotSet: GitSnapshotSet = {
+      root,
+      base: { type: "git", label: "base", commit: "a".repeat(40) },
+      head: { type: "working-tree", label: "HEAD" },
+      files: [
+        {
+          status: "modified",
+          beforePath: "README.md",
+          afterPath: "README.md",
+          supported: false,
+          excluded: false,
+          analysis: "unsupported",
+        },
+        {
+          status: "modified",
+          beforePath: "docs/CLI.md",
+          afterPath: "docs/CLI.md",
+          supported: false,
+          excluded: false,
+          analysis: "unsupported",
+        },
+        {
+          status: "modified",
+          beforePath: "tool.rb",
+          afterPath: "tool.rb",
+          supported: false,
+          excluded: false,
+          analysis: "unsupported",
+        },
+      ],
+      ignored: { unsupported: 3, excluded: 0 },
+    };
+    const readSpy = jest
+      .spyOn(GitSnapshotReader.prototype, "read")
+      .mockResolvedValue(snapshotSet);
+    try {
+      const result = await createImpactPlan({ cwd: root });
+
+      expect(result.plan.ignored.notAnalyzed).toEqual([
+        { path: "tool.rb", reason: "unsupported" },
+      ]);
+      expect(result.plan.ignored.unsupported).toBe(3);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
   test("does not import provider, command-context, template, or dotenv modules", async () => {
     const root = repository();
     writeFileSync(
@@ -764,6 +1231,172 @@ describe("createImpactPlan", () => {
       expect.objectContaining({ type: "git", commit: head }),
     );
   });
+  test("classifies only entry-reachable TypeScript symbols as public", async () => {
+    const root = repository();
+    mkdirSync(join(root, "src"));
+    mkdirSync(join(root, "src", "internal"));
+    writeFileSync(join(root, "package.json"), '{"main":"dist/index.js"}\n');
+    writeFileSync(
+      join(root, "src", "index.ts"),
+      'export { visible } from "./visible";\n',
+    );
+    writeFileSync(
+      join(root, "src", "visible.ts"),
+      "export function visible(value: string): string { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "src", "internal", "hidden.ts"),
+      "export function hidden(value: string): string { return value; }\n",
+    );
+    writeFileSync(join(root, "README.md"), "# API\n\n`visible` and `hidden`\n");
+    commit(root, "initial");
+    writeFileSync(join(root, "marker.txt"), "baseline\n");
+    commit(root, "baseline");
+    writeFileSync(
+      join(root, "src", "visible.ts"),
+      "export function visible(value: number): number { return value; }\n",
+    );
+    writeFileSync(
+      join(root, "src", "internal", "hidden.ts"),
+      "export function hidden(value: number): number { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.boundary?.typescript).toMatchObject({
+      mode: "entry",
+      entries: ["src/index.ts"],
+    });
+    expect(
+      result.plan.changes.map(({ qualifiedName, visibility }) => ({
+        qualifiedName,
+        visibility,
+      })),
+    ).toEqual([
+      { qualifiedName: "hidden", visibility: "internal" },
+      { qualifiedName: "visible", visibility: "public" },
+    ]);
+    expect(result.plan.summary).toMatchObject({
+      publicApiChanges: 1,
+      internalChanges: 1,
+      unmapped: 0,
+    });
+    expect(result.providerContext.changes).toEqual([
+      expect.objectContaining({ qualifiedName: "visible" }),
+    ]);
+  });
+
+  test("reports a public flip when only the TypeScript entry changes", async () => {
+    const root = repository();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "package.json"), '{"main":"dist/index.js"}\n');
+    writeFileSync(
+      join(root, "src", "index.ts"),
+      "export const VERSION = '1';\n",
+    );
+    writeFileSync(
+      join(root, "src", "foo.ts"),
+      "export function foo(value: string): string { return value; }\n",
+    );
+    writeFileSync(join(root, "README.md"), "# API\n\n## API\n\nUse `foo()`.\n");
+    commit(root, "base");
+    writeFileSync(
+      join(root, "src", "index.ts"),
+      "export const VERSION = '1';\nexport { foo } from './foo';\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root, base: "HEAD" });
+
+    expect(result.plan.changes).toEqual([
+      expect.objectContaining({
+        category: "exposed",
+        path: "src/foo.ts",
+        qualifiedName: "foo",
+        visibility: "public",
+        after: "foo(value: string): string",
+      }),
+      expect.objectContaining({
+        category: "dependency-changed",
+        path: "src/index.ts",
+      }),
+    ]);
+    expect(result.plan.summary).toMatchObject({
+      publicApiChanges: 1,
+      potentiallyBreaking: 0,
+    });
+  });
+
+  test("classifies Python __all__ exports and hidden module paths", async () => {
+    const root = repository();
+    mkdirSync(join(root, "pkg"));
+    writeFileSync(join(root, "pyproject.toml"), '[project]\nname = "pkg"\n');
+    writeFileSync(
+      join(root, "pkg", "__init__.py"),
+      'from .core import run, helper\n__all__ = ["run"]\n',
+    );
+    writeFileSync(
+      join(root, "pkg", "core.py"),
+      "def run(a):\n    return a\n\ndef helper(a):\n    return a\n",
+    );
+    writeFileSync(
+      join(root, "pkg", "_internal.py"),
+      "def leaked(a):\n    return a\n",
+    );
+    commit(root, "base");
+    writeFileSync(
+      join(root, "pkg", "core.py"),
+      "def run(a, b):\n    return a\n\ndef helper(a, b):\n    return a\n",
+    );
+    writeFileSync(
+      join(root, "pkg", "_internal.py"),
+      "def leaked(a, b):\n    return a\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root, base: "HEAD" });
+
+    expect(result.plan.boundary?.python).toMatchObject({
+      mode: "entry",
+      entries: ["pkg/__init__.py"],
+    });
+    expect(
+      result.plan.changes.map(({ qualifiedName, visibility }) => ({
+        qualifiedName,
+        visibility,
+      })),
+    ).toEqual([
+      { qualifiedName: "leaked", visibility: "internal" },
+      { qualifiedName: "helper", visibility: "internal" },
+      { qualifiedName: "run", visibility: "public" },
+    ]);
+    expect(result.plan.summary).toMatchObject({
+      publicApiChanges: 1,
+      internalChanges: 2,
+    });
+  });
+
+  test("leaves visibility absent when entry discovery falls back", async () => {
+    const root = repository();
+    writeFileSync(
+      join(root, "api.mts"),
+      "export function api(value: string): string { return value; }\n",
+    );
+    commit(root, "initial");
+    writeFileSync(
+      join(root, "api.mts"),
+      "export function api(value: number): number { return value; }\n",
+    );
+
+    const result = await createImpactPlan({ cwd: root });
+
+    expect(result.plan.boundary?.typescript).toMatchObject({
+      mode: "fallback",
+      reason: "no-manifest",
+    });
+    expect(result.plan.changes[0]?.visibility).toBeUndefined();
+    expect(result.plan.summary.publicApiChanges).toBe(1);
+    expect(result.plan.summary.internalChanges).toBeUndefined();
+  });
+
   test("applies symbol, source-path, and independently observable doc suppressions", async () => {
     const root = repository();
     mkdirSync(join(root, "src"));

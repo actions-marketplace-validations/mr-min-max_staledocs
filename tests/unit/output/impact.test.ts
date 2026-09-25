@@ -18,7 +18,9 @@ function plan(overrides: Partial<ImpactPlan> = {}): ImpactPlan {
       unmapped: 1,
       byCategory: {
         added: 0,
+        exposed: 0,
         removed: 0,
+        hidden: 0,
         moved: 0,
         "contract-changed": 1,
         "implementation-changed": 1,
@@ -147,6 +149,7 @@ describe("impact-plan output", () => {
 
     expect(formatImpactPlan(withChange)).not.toContain("before:");
     const verbose = formatImpactPlan(withChange, true);
+    expect(verbose).toContain("Change: transform (contract-changed)");
     expect(verbose).toContain("  before: transform(value: string): string");
     expect(verbose).toContain(
       "  after:  transform(value: string, count: number): string",
@@ -340,6 +343,25 @@ describe("impact-plan output", () => {
     );
     expect(noSafeTarget).toContain("Use --target <file>");
     expect(noSafeTarget).not.toContain("Next: staledocs update");
+  });
+
+  it("renders public boundary details only in verbose output", () => {
+    const boundaryPlan = plan({
+      boundary: {
+        typescript: {
+          mode: "entry",
+          entries: ["src/index.ts"],
+          filesRead: 12,
+        },
+      },
+    });
+
+    expect(formatImpactPlan(boundaryPlan)).not.toContain(
+      "Boundary (TypeScript)",
+    );
+    expect(formatImpactPlan(boundaryPlan, true)).toContain(
+      "Boundary (TypeScript): entry src/index.ts (12 files read)",
+    );
   });
 
   // Break caught: JSON output gains whitespace/log framing or relies on object

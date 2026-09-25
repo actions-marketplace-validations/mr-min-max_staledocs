@@ -1,8 +1,6 @@
 # StaleDocs with local Codex
 
-This guide covers the published beta.5 CLI with the official local Codex host
-and StaleDocs's provider-free MCP tools. It is not a ChatGPT web integration or a
-marketplace installation guide.
+This guide covers the published `0.4.0-beta.1` StaleDocs CLI with the official local Codex host and StaleDocs's provider-free MCP tools. It is not a ChatGPT web integration or a marketplace installation guide.
 
 For the complete command catalogue and beta boundaries, see [CLI.md](../CLI.md)
 and [Public Beta](../PUBLIC_BETA.md). The [GitHub Action reference](../GITHUB_ACTION.md)
@@ -107,6 +105,8 @@ sequence:
 The preparation/validation path is provider-free and does not write the
 repository. It uses the host's model for the bounded candidate, not a legacy
 provider-backed MCP generation call and not a subscription-to-API bridge.
+
+A live fix-path check on 2026-09-12 with Codex CLI 0.149.0-alpha.4.1 produced a correct README candidate for a changed public TypeScript API. The first validation using the exact signed output of its preparation accepted that candidate with no warnings, and no repository file was written without permission. Two preliminary manual-transcription attempts failed closed and are tracked in issue #49.
 
 ## Trust boundary
 

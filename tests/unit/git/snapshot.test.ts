@@ -93,9 +93,10 @@ describe("GitSnapshotReader", () => {
       exclude: [],
     });
     expect(tree.ignored.unsupported).toBeGreaterThanOrEqual(1);
-    expect(tree.files.find((f) => f.afterPath === "note.txt")?.supported).toBe(
-      false,
-    );
+    expect(tree.files.find((f) => f.afterPath === "note.txt")).toMatchObject({
+      supported: false,
+      analysis: "unsupported",
+    });
   });
 
   test("rejects a leading option marker as a fixed invalid ref", async () => {
@@ -754,7 +755,13 @@ exec "${realGit}" "$@"
     ).toEqual(expect.objectContaining({ supported: true, excluded: true }));
     expect(
       result.files.find((file) => file.afterPath === "src/note.txt"),
-    ).toEqual(expect.objectContaining({ supported: false, excluded: false }));
+    ).toEqual(
+      expect.objectContaining({
+        supported: false,
+        excluded: false,
+        analysis: "unsupported",
+      }),
+    );
     expect(result.ignored).toEqual({ unsupported: 1, excluded: 1 });
   });
 
@@ -809,6 +816,79 @@ exec "${realGit}" "$@"
       message: "The Git head could not be resolved.",
     });
     expect(String(missingHead)).not.toContain(sentinel);
+  });
+
+  test("reads optional revision files and lists bounded package manifests", async () => {
+    const root = repo();
+    mkdirSync(join(root, "packages"), { recursive: true });
+    mkdirSync(join(root, "packages", "one"), { recursive: true });
+    mkdirSync(join(root, "packages", "two"), { recursive: true });
+    mkdirSync(join(root, "node_modules", "ignored"), { recursive: true });
+    mkdirSync(join(root, "dist", "generated"), { recursive: true });
+    mkdirSync(join(root, "build", "generated"), { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"main":"src/index.ts"}\n');
+    writeFileSync(join(root, "packages", "one", "package.json"), "{}\n");
+    writeFileSync(join(root, "packages", "two", "package.json"), "{}\n");
+    writeFileSync(
+      join(root, "node_modules", "ignored", "package.json"),
+      "{}\n",
+    );
+    writeFileSync(join(root, "dist", "generated", "package.json"), "{}\n");
+    writeFileSync(join(root, "build", "generated", "package.json"), "{}\n");
+    writeFileSync(join(root, "entry.mts"), "export const value = 1;\n");
+    commit(root, "initial");
+
+    const reader = new GitSnapshotReader(root);
+    await reader.read({ base: "HEAD", include: ["**/*"], exclude: [] });
+
+    await expect(reader.readAt("base", "entry.mts")).resolves.toContain(
+      "export const value",
+    );
+    await expect(reader.readAt("base", "missing.ts")).resolves.toBeUndefined();
+    await expect(reader.listPackageManifests("base")).resolves.toEqual([
+      "package.json",
+      "packages/one/package.json",
+      "packages/two/package.json",
+    ]);
+    await expect(reader.listPackageManifests("base", 2)).resolves.toEqual([
+      "package.json",
+      "packages/one/package.json",
+    ]);
+  });
+
+  // Break caught: the missing-file probe dereferences the empty-tree sentinel as a
+  // commit, so a first-commit repository fails planning instead of reporting absence.
+  test("treats files as absent at the empty-tree base of a first commit", async () => {
+    const root = repo();
+    writeFileSync(root + "/only.ts", "export const only = 1;\n");
+    commit(root, "initial");
+
+    const reader = new GitSnapshotReader(root);
+    await reader.read({ include: ["**/*"], exclude: [] });
+
+    await expect(reader.readAt("base", "only.ts")).resolves.toBeUndefined();
+    await expect(reader.listPackageManifests("base")).resolves.toEqual([]);
+  });
+
+  test("reads untracked head files and manifests in working-tree mode", async () => {
+    const root = repo();
+    writeFileSync(join(root, "base.ts"), "export const base = 1;\n");
+    commit(root, "initial");
+    mkdirSync(join(root, "apps"));
+    mkdirSync(join(root, "apps", "web"));
+    writeFileSync(join(root, "apps", "web", "package.json"), "{}\n");
+    writeFileSync(join(root, "head.cjs"), "export const head = 1;\n");
+
+    const reader = new GitSnapshotReader(root);
+    await reader.read({ base: "HEAD", include: ["**/*"], exclude: [] });
+
+    await expect(reader.readAt("head", "head.cjs")).resolves.toContain(
+      "export const head",
+    );
+    await expect(reader.readAt("head", "missing.cjs")).resolves.toBeUndefined();
+    await expect(reader.listPackageManifests("head")).resolves.toEqual([
+      "apps/web/package.json",
+    ]);
   });
 
   test("rejects direct containment escapes with a fixed unsafe-path error", async () => {

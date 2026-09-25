@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0-beta.1] - 2026-09-12
+
+- Resolve the TypeScript and JavaScript public boundary from package entries and bounded static relative re-exports, with loud fallback when no entry is available.
+- Add the optional `entry` configuration override and support `.mts`, `.cts`, `.mjs`, and `.cjs` module files.
+- Add optional `boundary`, symbol `visibility`, and `summary.internalChanges` fields without changing the v1 plan, context, or review schema versions.
+- Detect symbols that become exposed or hidden through resolved TypeScript and JavaScript package entries even when their declaration file does not change.
+- Resolve Python public boundaries from bounded package entries, literal `__all__`, static relative imports, and the private underscore-path rule.
+- Add optional `exposed` and `hidden` change categories and summary keys without changing the v1 plan, context, or review schema versions.
+- Fold redundant class and interface member rows when a changed public method already identifies the actionable contract change.
+- Treat a class as documented when one of its changed members has a direct reference, while keeping unmentioned methods unmapped.
+- Treat changelog-style files as recommendation-only history rather than stale direct-reference targets.
+- Detect JavaScript module systems through the TypeScript AST and list unsupported or non-enumerable CommonJS files in the optional bounded `ignored.notAnalyzed` report field.
+- Add `comment: on-findings` for pull request comments only when the review verdict is stale or breaking, while preserving `true` as the default.
+- Discover root Markdown, common documentation directories, package-local Markdown, and safely configured `docs` paths with deterministic 30-file and 2000-file caps.
+- Prefer the README nearest to a changed entrypoint or architecture source, falling back to the root README.
+- Add the optional `ignored.documentationLimitReached` field without changing the v1 plan schema version.
+- Add pre-labeled external PR evaluations, exact published-package selection with `--package`, and deterministic before/after expectation counts with `--compare`.
+- Keep observed outcomes derived from review JSON counts, preserve error rows, and stop comparison when any label class matches fewer expectations.
+
 ## [0.3.0-beta.1] - 2026-09-10
 
 - Impact snapshots now carry deterministic AST-rendered before/after signatures and callable arity, with conservative arity-based breaking-risk classification.

@@ -24,15 +24,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: mr-min-max/staledocs@v0.3.0-beta.1
+      - uses: mr-min-max/staledocs@v0.4.0-beta.1
         with:
           mode: review
           fail-on: none
 ```
 
-The review workflow is pinned to the current release candidate. The moving `@v0`
-major convenience pin is available after publication and may move to a later
-release. The check and generate examples below use the same release candidate.
+The examples use the immutable published `v0.4.0-beta.1` tag. The moving `v0` tag also points to this release.
 
 The comment starts with a hidden marker and lists changed signatures, affected
 sections, and whether each section changed in the pull request:
@@ -41,14 +39,16 @@ sections, and whether each section changed in the pull request:
 <!-- staledocs-review -->
 ### StaleDocs: documentation impact
 
-**1 public API change**, 0 potentially breaking. **1 documentation section** mention changed symbols and were not updated in this PR.
+**1 public API change**, 1 potentially breaking. **1 documentation section** mention changed symbols and were not updated in this PR.
 
 | Symbol | Change | Before | After |
 | --- | --- | --- | --- |
-| `createUser` | parameters | `createUser(email: string): string` | `createUser(email: string, role: string): string` |
+| `Client.get` | parameters (breaking) | `get(url: string): Promise<string>` | `get(url: string, init: RequestInit): Promise<string>` |
 
 **Needs a documentation update**
-- `README.md` > API: `createUser`
+- `README.md` > Usage: `Client.get`
+
+Public boundary (TypeScript): `src/index.ts`. 2 internal changes not shown.
 
 <sub>Deterministic AST analysis; no model was used. Suppress a symbol with `.staledocsignore`. <a href="https://github.com/mr-min-max/staledocs">StaleDocs</a></sub>
 ```
@@ -56,11 +56,12 @@ sections, and whether each section changed in the pull request:
 Review mode needs `permissions: contents: read` and `pull-requests: write` for
 comments and labels. Use `actions/checkout` with `fetch-depth: 0`, because the
 planner needs the pull request base commit. A fork pull request can have a
-read-only token. In that case the Action emits a notice and writes the Markdown
-report to the job summary without failing because of posting.
+read-only token. The Markdown report is always written to the job summary. If
+posting is denied, the Action also emits a notice and remains non-fatal.
 
-The review mode wording is intentional: review mode reports only the drift this
-pull request introduces; pre-existing stale documentation is not reported.
+Review mode reports only the public drift this pull request introduces; the
+footer names the resolved boundary and reports hidden internal changes. Files
+that could not be enumerated are listed as **Not analyzed** in the report.
 
 ### Review inputs
 
@@ -68,7 +69,7 @@ pull request introduces; pre-existing stale documentation is not reported.
 | --- | --- | --- |
 | `mode` | `review` | `review`, `check`, or `generate`; review is the default. |
 | `fail-on` | `none` | `none`, `stale`, or `breaking`. The report is still produced before an opt-in failure. |
-| `comment` | `true` | Update the token user's marked comment, post it if absent, or delete it when there are no public API changes. |
+| `comment` | `true` | `true` updates or posts the marked comment whenever public API changes exist. `on-findings` comments only for a `stale` or `breaking` verdict and deletes an existing marked comment when the verdict becomes `clean`. `false` disables comment operations. When comment operations are enabled, both active modes delete the marked comment when there are no public API changes. |
 | `labels` | `true` | Ensure and update `docs-stale` and `breaking-change`. A missing label on deletion is tolerated. |
 | `github-token` | `${{ github.token }}` | Token used for pull request API calls. |
 | `source` | `npm` | `npm` installs the package version from this Action ref. `local` runs `npm ci`, `npm run build`, and `npm link`. |
@@ -79,6 +80,12 @@ SHAs from the event, writes JSON to its temporary report path, and exposes
 `verdict`, `public-api-changes`, `stale-documents`, `breaking`, and `report`.
 Non-pull-request runs use `since` as the base, inspect the working tree, print the
 text report, and do not invoke `gh`.
+
+For busy repositories, use `comment: on-findings` to keep clean confirmations in
+the job summary instead of the pull request timeline. The default remains `true`
+so first-time adopters see the `Updated in this PR` confirmation. A report that
+contains only not-analyzed files is visible in the job summary and logs but does
+not create a pull request comment.
 
 Labels use the following stable metadata:
 
@@ -109,7 +116,7 @@ Check mode is provider-free and reports only whether selected documents changed 
 public symbols they directly mention. It does not compare prose correctness.
 
 ```yaml
-- uses: mr-min-max/staledocs@v0.3.0-beta.1
+- uses: mr-min-max/staledocs@v0.4.0-beta.1
   with:
     mode: check
     since: ${{ github.event.pull_request.base.sha }}
@@ -124,7 +131,7 @@ The `commands` input is a comma-separated list of `readme`, `api`, `changelog`, 
 Generate mode remains available for provider-backed documentation creation:
 
 ```yaml
-- uses: mr-min-max/staledocs@v0.3.0-beta.1
+- uses: mr-min-max/staledocs@v0.4.0-beta.1
   with:
     mode: generate
     provider: openai

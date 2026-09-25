@@ -50,7 +50,10 @@ export function assessDocumentationFreshness(input: {
   const targetChanged = changedFiles.includes(target);
   const symbolChanges = new Map(
     input.plan.changes
-      .filter((change) => change.scope === "symbol")
+      .filter(
+        (change) =>
+          change.scope === "symbol" && change.visibility !== "internal",
+      )
       .map((change) => [change.id, change]),
   );
   const referencesBySection = new Map<
@@ -76,14 +79,34 @@ export function assessDocumentationFreshness(input: {
     }
   }
 
-  const unmappedSymbols = input.plan.documentation
-    .filter((impact) => impact.unmapped)
-    .map((impact) => symbolChanges.get(impact.changeId)?.qualifiedName)
-    .filter((name): name is string => name !== undefined);
+  const mappedMemberRoots = new Set<string>();
+  for (const impact of input.plan.documentation) {
+    if (impact.directReferences.length === 0) continue;
+    const qualifiedName = symbolChanges.get(impact.changeId)?.qualifiedName;
+    if (qualifiedName === undefined) continue;
+    const separator = qualifiedName.indexOf(".");
+    if (separator > 0) mappedMemberRoots.add(qualifiedName.slice(0, separator));
+  }
+  const unmappedSymbols: string[] = [];
+  for (const impact of input.plan.documentation) {
+    if (impact.directReferences.length > 0) continue;
+    const change = symbolChanges.get(impact.changeId);
+    if (change?.qualifiedName === undefined) continue;
+    if (
+      (change.kind === "class" || change.kind === "interface") &&
+      mappedMemberRoots.has(change.qualifiedName)
+    ) {
+      continue;
+    }
+    unmappedSymbols.push(change.qualifiedName);
+  }
   const sourceFiles = [
     ...new Set(
       input.plan.changes
-        .filter((change) => change.scope === "symbol")
+        .filter(
+          (change) =>
+            change.scope === "symbol" && change.visibility !== "internal",
+        )
         .map((change) => normalizeDocPath(change.path)),
     ),
   ].sort(compareStrings);
@@ -168,10 +191,14 @@ export async function checkDocumentationFreshness(
       base: since,
       head: to === "HEAD" ? undefined : to,
     });
-    const discovered = target === undefined ? await discoverReadme(root) : undefined;
-    const requestedTarget = target === undefined ? discovered ?? "README.md" : target;
+    const discovered =
+      target === undefined ? await discoverReadme(root) : undefined;
+    const requestedTarget =
+      target === undefined ? (discovered ?? "README.md") : target;
     const absoluteTarget = path.resolve(root, requestedTarget);
-    const relativeTarget = normalizeDocPath(path.relative(root, absoluteTarget));
+    const relativeTarget = normalizeDocPath(
+      path.relative(root, absoluteTarget),
+    );
     const changedFiles = await getChangedFiles(
       since,
       to === "HEAD" ? undefined : to,
@@ -197,7 +224,6 @@ export async function checkDocumentationFreshness(
     };
   }
 }
-
 
 function compareStrings(left: string, right: string): number {
   if (left === right) return 0;

@@ -32,7 +32,15 @@ interface MutableSection {
 }
 
 const GENERIC_HEADING_NAMES = new Set(["get", "set", "run", "main", "open"]);
-const API_CATEGORIES = new Set(["added", "removed", "contract-changed"]);
+const API_CATEGORIES = new Set([
+  "added",
+  "exposed",
+  "removed",
+  "hidden",
+  "contract-changed",
+]);
+const CHANGELOG_BASENAME =
+  /^(changelog|changes|history|news|releases?)(\.md)?$/iu;
 
 /** Indexes Markdown headings and their normalized repository-relative evidence. */
 export function indexDocumentation(
@@ -54,15 +62,25 @@ export function mapDocumentationImpact(
   const sections = scanDocumentation(files);
   const apiSection = selectSection(sections, apiSectionScore);
   const changelogSection = selectSection(sections, changelogSectionScore);
-  const readmeSection = selectSection(sections, readmeSectionScore);
+  const rootReadmeSection = selectSection(sections, (section) =>
+    pathPosix.basename(section.file).toLowerCase() === "readme.md" &&
+    pathPosix.dirname(section.file) === "."
+      ? 0
+      : undefined,
+  );
   const architectureSection = selectSection(sections, architectureSectionScore);
 
   return [...changes].sort(compareChangeKeys).map((change) => {
     const directReferences: DocumentationReference[] = [];
     const qualifiedName = change.qualifiedName;
     const sourcePath = normalizeRepositoryPath(change.path);
+    const readmeSection =
+      selectSection(sections, (section) =>
+        readmeSectionScore(section, change.path),
+      ) ?? rootReadmeSection;
 
     for (const section of sections) {
+      if (CHANGELOG_BASENAME.test(pathPosix.basename(section.file))) continue;
       if (
         qualifiedName !== undefined &&
         section.codeSpans.some((span) => containsExactName(span, qualifiedName))
@@ -105,7 +123,7 @@ export function mapDocumentationImpact(
       }
     }
     if (change.category === "dependency-changed") {
-      const dependencySection = architectureSection ?? readmeSection;
+      const dependencySection = readmeSection ?? architectureSection;
       if (dependencySection !== undefined) {
         recommendations.push(toReference(dependencySection, "architecture"));
       }
@@ -509,14 +527,24 @@ function apiSectionScore(section: ScannedSection): number | undefined {
 }
 
 function changelogSectionScore(section: ScannedSection): number | undefined {
-  return pathPosix.basename(section.file).toLowerCase() === "changelog.md"
+  return CHANGELOG_BASENAME.test(pathPosix.basename(section.file))
     ? 0
     : undefined;
 }
 
-function readmeSectionScore(section: ScannedSection): number | undefined {
-  return pathPosix.basename(section.file).toLowerCase() === "readme.md"
-    ? 0
+function readmeSectionScore(
+  section: ScannedSection,
+  sourcePath: string,
+): number | undefined {
+  if (pathPosix.basename(section.file).toLowerCase() !== "readme.md") {
+    return undefined;
+  }
+  const source = normalizeRepositoryPath(sourcePath);
+  if (source === undefined) return undefined;
+  const directory = pathPosix.dirname(section.file);
+  if (directory === ".") return undefined;
+  return source.startsWith(`${directory}/`)
+    ? -directory.split("/").length
     : undefined;
 }
 

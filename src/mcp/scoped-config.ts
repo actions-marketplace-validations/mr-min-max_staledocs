@@ -275,6 +275,12 @@ function freezePlanningConfig(value: PlanningConfig): Readonly<PlanningConfig> {
     ...value,
     include: Object.freeze([...value.include]),
     exclude: Object.freeze([...value.exclude]),
+    ...(value.entry === undefined
+      ? {}
+      : { entry: Object.freeze([...value.entry]) }),
+    ...(value.docs === undefined
+      ? {}
+      : { docs: Object.freeze([...value.docs]) }),
   }) as unknown as Readonly<PlanningConfig>;
 }
 
@@ -680,6 +686,12 @@ function freezeAidocConfig(config: AidocConfig): Readonly<AidocConfig> {
     ...config,
     include: Object.freeze([...config.include]),
     exclude: Object.freeze([...config.exclude]),
+    ...(config.entry === undefined
+      ? {}
+      : { entry: Object.freeze([...config.entry]) }),
+    ...(config.docs === undefined
+      ? {}
+      : { docs: Object.freeze([...config.docs]) }),
     readme: Object.freeze({ ...config.readme }),
   }) as unknown as Readonly<AidocConfig>;
 }

@@ -4,13 +4,25 @@
 
 StaleDocs maps changed public symbols to documentation sections. It does not prove that prose is correct, complete, or appropriate for readers.
 
+## Public boundary
+
+A public symbol is one that a consumer can import from the package entry. StaleDocs discovers entries from `package.json` (`exports`, then `types`, `module`, `main`; build paths such as `dist/index.js` are mapped to `src/index.ts` when that file exists) for the root package and one level of workspace packages, then follows static `export ... from` statements with relative specifiers. `export * as ns from` is followed one level. Bare specifiers, `require()`, dynamic `import()`, `tsconfig` path aliases, and CommonJS are not followed. Set `entry` in the configuration to override discovery. When no entry can be resolved, every export in a changed file is treated as public and the report says so.
+
+For Python, StaleDocs discovers root package `__init__.py` entries from the bounded project metadata subset and root or `src` package directories. A path segment beginning with `_` is private except for `__init__.py` and `__main__.py`. A literal list or tuple assigned to `__all__` selects public declarations and relative imports. Without `__all__`, public declarations and names imported into `__init__.py` are treated as reachable. This intentionally differs from Griffe for imported names because small packages commonly re-export them without `__all__`. Resolution follows the package root plus one subpackage `__init__.py`; deeper re-export chains, imports under `if TYPE_CHECKING:`, and dynamic `__all__` values are not followed. Symbols in ordinary modules that are not imported by a selected initializer are internal. Configure additional `__init__.py` entry files when the package documents another surface.
+
+### Re-export changes
+
+Adding a symbol to a resolved entry is reported as `now exported`. Removing it is reported as `no longer exported` and potentially breaking. These flips are emitted only when the public entry resolves at both revisions.
+
 ## Languages and syntax not enumerated
 
-TypeScript and JavaScript analysis does not infer every re-export or CommonJS export. Python analysis does not enumerate module constants or dynamic exports. Generated exports and runtime registration are outside the AST snapshot.
+CommonJS modules (`module.exports`, `exports.x`) are not enumerated; they are listed as not analyzed in the report. Python analysis does not enumerate module constants or dynamic exports. Generated exports and runtime registration are outside the AST snapshot.
 
 ## Documentation discovery
 
-The planner recognizes root `README.md` and `CHANGELOG.md` names without case sensitivity. It recursively scans files with a case-insensitive `.md` extension under `docs` and under a configured output directory. Planning exclusion globs are applied while selecting candidates. After discovery, `.staledocsignore` removes documentation through case-sensitive path patterns whose literal suffix is `.md`, such as `docs/legacy/*.md`.
+The planner discovers up to 30 case-insensitive `*.md` files at the repository root. It recursively scans `docs`, `doc`, `documentation`, `guide`, `guides`, the configured output directory, and repository-relative files or directories listed in `docs` configuration. It also scans `*.md` files non-recursively beside discovered JavaScript or TypeScript package manifests and Python package roots. Directory discovery stops after 2000 unique Markdown files; traversal also stops after 2000 directories or 10000 filesystem entries. Reaching any of these ceilings sets the optional `ignored.documentationLimitReached` plan field. The `docs` array accepts at most 100 entries. Planning exclusion globs and repository-relative path safety apply to every candidate, and symlinks are skipped. After discovery, `.staledocsignore` removes documentation through case-sensitive path patterns whose literal suffix is `.md`, such as `docs/legacy/*.md`.
+
+Changelog-style files (`CHANGELOG.md`, `CHANGES.md`, `HISTORY.md`, `NEWS.md`, `RELEASES.md`) are read for recommendations only; their entries are history and are never reported as stale.
 
 ## Git requirements
 

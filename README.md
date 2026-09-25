@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: {fetch-depth: 0}
-      - uses: mr-min-max/staledocs@v0.3.0-beta.1
+      - uses: mr-min-max/staledocs@v0.4.0-beta.1
         with:
           mode: review
 ```
@@ -57,7 +57,7 @@ See the [Codex guide](./docs/integrations/codex.md) and [Claude guide](./docs/in
 
 ## Languages
 
-TypeScript, JavaScript, and Python are supported. A public symbol is an exported function, class, type, method, or constant that can be referenced by another module.
+TypeScript, JavaScript, and Python are supported. A public symbol is one reachable from the package entry; see [LIMITATIONS.md](./docs/LIMITATIONS.md).
 
 See [LIMITATIONS.md](./docs/LIMITATIONS.md) for syntax and discovery caveats.
 
@@ -67,7 +67,7 @@ See [LIMITATIONS.md](./docs/LIMITATIONS.md) for syntax and discovery caveats.
 
 ## Status and links
 
-Public beta `0.3.0-beta.1`.
+StaleDocs `0.4.0-beta.1` is published. npm `latest`, npm `beta`, and the GitHub Action `v0` tag all use this release.
 
 [![npm](https://img.shields.io/npm/v/staledocs/beta?label=npm%20beta)](https://www.npmjs.com/package/staledocs)
 [![CI](https://github.com/mr-min-max/staledocs/actions/workflows/ci.yml/badge.svg)](https://github.com/mr-min-max/staledocs/actions/workflows/ci.yml)

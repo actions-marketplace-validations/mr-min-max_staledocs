@@ -16,11 +16,20 @@ import {
 } from "../config/planning";
 import { GitSnapshotReader, type SnapshotFileChange } from "../git/snapshot";
 import { getSnapshotParserForFile } from "../parsers/registry";
+import {
+  diffBoundaries,
+  resolveBoundary,
+  resolvePythonBoundary,
+  type BoundaryFlip,
+  type ResolvedBoundary,
+} from "./boundary";
 import { buildImpactContext } from "./context";
 import {
+  createChange,
   digestImpactPayload,
   compareSnapshots,
   summarizeImpact,
+  type ParsedFileSnapshots,
 } from "./compare";
 import {
   mapDocumentationImpact,
@@ -31,7 +40,10 @@ import {
   PlanFailure,
   type ImpactPlan,
   type ImpactPlanningResult,
+  type LanguageBoundaryReport,
   type ParserModuleSnapshot,
+  type ParserSymbolSnapshot,
+  type SymbolChange,
 } from "./types";
 
 export interface ImpactPlanOptions {
@@ -56,9 +68,32 @@ interface FilesystemIdentity {
   type: string;
 }
 
+interface LanguageBoundaryResolution {
+  report: LanguageBoundaryReport;
+  base: ResolvedBoundary;
+  head: ResolvedBoundary;
+  documentationDirectories: string[];
+}
+
+interface DocumentationDiscovery {
+  files: DocumentationFile[];
+  limitReached: boolean;
+}
+
+interface DocumentationCandidateBudget {
+  paths: Set<string>;
+  files: Set<string>;
+  directories: Map<string, "shallow" | "deep">;
+  walkedEntries: number;
+  limitReached: boolean;
+}
+
 const execFile = promisify(execFileCallback);
 const DOCUMENTATION_READ_TIMEOUT_MS = 5_000;
 const DOCUMENTATION_READ_MAX_BUFFER = 10 * 1024 * 1024;
+const DOCUMENTATION_WALK_ENTRY_LIMIT = 10_000;
+const ROOT_MARKDOWN_LIMIT = 30;
+const DOCUMENTATION_DISCOVERY_LIMIT = 2000;
 const DOCUMENTATION_READER_SCRIPT = String.raw`
 const fs = require("node:fs");
 const [
@@ -159,7 +194,8 @@ export async function createImpactPlan(
     );
   }
 
-  const snapshotSet = await new GitSnapshotReader(cwd).read({
+  const reader = new GitSnapshotReader(cwd);
+  const snapshotSet = await reader.read({
     base: options.base,
     head: options.head,
     include: config.include,
@@ -167,10 +203,67 @@ export async function createImpactPlan(
   });
   const { root, base, head, ignored } = snapshotSet;
   const sourceFiles = snapshotSet.files;
-  const parsed = await snapshotChangedSources(sourceFiles).finally(() => {
-    sourceFiles.length = 0;
+  const unsupportedNotAnalyzed = sourceFiles.flatMap((file) => {
+    if (file.analysis !== "unsupported") return [];
+    const path = file.afterPath ?? file.beforePath;
+    // Markdown is read as documentation, so naming it "not analyzed" would
+    // contradict the documentation rows in the same report.
+    if (path === undefined || /\.md$/iu.test(path)) return [];
+    return [{ path, reason: "unsupported" as const }];
   });
-  const allChanges = compareSnapshots(parsed);
+  const hasTypeScriptChanges = sourceFiles.some(
+    (file) =>
+      file.supported &&
+      !file.excluded &&
+      isTypeScriptPath(file.afterPath ?? file.beforePath),
+  );
+  const hasPythonChanges = sourceFiles.some(
+    (file) =>
+      file.supported &&
+      !file.excluded &&
+      isPythonPath(file.afterPath ?? file.beforePath),
+  );
+  const parsed = await snapshotChangedSources(sourceFiles);
+  const commonJsNotAnalyzed = sourceFiles.flatMap((file) => {
+    if (file.analysis !== "commonjs") return [];
+    const path = file.afterPath ?? file.beforePath;
+    return path === undefined ? [] : [{ path, reason: "commonjs" as const }];
+  });
+  const boundaryFiles = sourceFiles.map((file) => ({
+    status: file.status,
+    beforePath: file.beforePath,
+    afterPath: file.afterPath,
+  }));
+  sourceFiles.length = 0;
+  let allChanges = compareSnapshots(parsed);
+  const [typeScriptBoundary, pythonBoundary] = await Promise.all([
+    hasTypeScriptChanges
+      ? resolveTypeScriptBoundary(reader, config.entry)
+      : undefined,
+    hasPythonChanges
+      ? resolveProjectPythonBoundary(reader, config.entry)
+      : undefined,
+  ]);
+  if (typeScriptBoundary !== undefined) {
+    allChanges = await applyBoundary(
+      allChanges,
+      parsed,
+      boundaryFiles,
+      typeScriptBoundary,
+      reader,
+      "typescript",
+    );
+  }
+  if (pythonBoundary !== undefined) {
+    allChanges = await applyBoundary(
+      allChanges,
+      parsed,
+      boundaryFiles,
+      pythonBoundary,
+      reader,
+      "python",
+    );
+  }
   const suppressions = options.suppressions ?? (await loadSuppressions(root));
   const suppressed: SuppressedChange[] = [];
   const changes = allChanges.filter((change) => {
@@ -190,22 +283,46 @@ export async function createImpactPlan(
     });
     return false;
   });
-  const documentationFiles = await loadDocumentationFiles(
+  const documentationDiscovery = await loadDocumentationFiles(
     root,
     config.outputDir,
+    config.docs,
+    [
+      ...(typeScriptBoundary?.documentationDirectories ?? []),
+      ...(pythonBoundary?.documentationDirectories ?? []),
+    ],
     config.exclude,
   );
+  const documentationFiles = documentationDiscovery.files;
   const filteredDocumentationFiles = documentationFiles.filter(
-    (file) => matchingSuppression(file.path, suppressions.docPaths) === undefined,
+    (file) =>
+      matchingSuppression(file.path, suppressions.docPaths) === undefined,
   );
   const documentation = mapDocumentationImpact(
     changes,
     filteredDocumentationFiles,
   );
   const summary = summarizeImpact(changes, documentation);
+  const notAnalyzed = [...unsupportedNotAnalyzed, ...commonJsNotAnalyzed]
+    .sort(
+      (left, right) =>
+        compareStrings(left.path, right.path) ||
+        compareStrings(left.reason, right.reason),
+    )
+    .filter(
+      (item, index, values) =>
+        index === 0 ||
+        item.path !== values[index - 1]?.path ||
+        item.reason !== values[index - 1]?.reason,
+    )
+    .slice(0, 50);
   const planIgnored = {
     ...ignored,
     suppressed: suppressed.length,
+    ...(notAnalyzed.length === 0 ? {} : { notAnalyzed }),
+    ...(documentationDiscovery.limitReached
+      ? { documentationLimitReached: true }
+      : {}),
   };
   const digest = digestImpactPayload({
     base,
@@ -231,6 +348,18 @@ export async function createImpactPlan(
     documentation,
     context: context.report,
     ignored: planIgnored,
+    ...(typeScriptBoundary === undefined && pythonBoundary === undefined
+      ? {}
+      : {
+          boundary: {
+            ...(typeScriptBoundary === undefined
+              ? {}
+              : { typescript: typeScriptBoundary.report }),
+            ...(pythonBoundary === undefined
+              ? {}
+              : { python: pythonBoundary.report }),
+          },
+        }),
     digest,
   };
   return { plan, providerContext: context.providerContext, suppressed };
@@ -257,6 +386,17 @@ async function snapshotChangedSources(files: SnapshotFileChange[]): Promise<
     if (!file.supported || file.excluded) continue;
     const before = await snapshotSource(file.beforePath, file.beforeSource);
     const after = await snapshotSource(file.afterPath, file.afterSource);
+    const commonJsPath = [
+      { path: file.beforePath, snapshot: before },
+      { path: file.afterPath, snapshot: after },
+    ].find(
+      ({ path, snapshot }) =>
+        path !== undefined &&
+        isJavaScriptPath(path) &&
+        snapshot?.moduleSystem === "commonjs" &&
+        snapshot.symbols.length === 0,
+    )?.path;
+    if (commonJsPath !== undefined) file.analysis = "commonjs";
     if (before === undefined && after === undefined) continue;
     parsed.push({
       status: file.status,
@@ -272,6 +412,7 @@ async function snapshotChangedSources(files: SnapshotFileChange[]): Promise<
 async function snapshotSource(
   filePath: string | undefined,
   source: string | undefined,
+  strict = true,
 ): Promise<ParserModuleSnapshot | undefined> {
   if (filePath === undefined || source === undefined) return undefined;
   const parser = getSnapshotParserForFile(filePath);
@@ -279,6 +420,7 @@ async function snapshotSource(
   try {
     return await parser.snapshot(filePath, source);
   } catch {
+    if (!strict) return undefined;
     throw new PlanFailure(
       "PLAN_PARSE_FAILED",
       "Unable to parse changed source.",
@@ -287,35 +429,347 @@ async function snapshotSource(
   }
 }
 
+async function resolveTypeScriptBoundary(
+  reader: GitSnapshotReader,
+  configuredEntries: readonly string[] | undefined,
+): Promise<LanguageBoundaryResolution> {
+  const manifests = await Promise.all(
+    (["base", "head"] as const).map((revision) =>
+      reader.listPackageManifests(revision),
+    ),
+  );
+  const [baseBoundary, headBoundary] = await Promise.all(
+    (["base", "head"] as const).map((revision, index) =>
+      resolveBoundary({
+        readFile: (path) => reader.readAt(revision, path),
+        listPackageJson: () => Promise.resolve(manifests[index] ?? []),
+        snapshot: (path, source) => snapshotSource(path, source, false),
+        ...(configuredEntries === undefined ? {} : { configuredEntries }),
+      }),
+    ),
+  );
+  return {
+    ...mergeBoundaryReports(baseBoundary, headBoundary),
+    documentationDirectories: packageDirectories(manifests[1] ?? []),
+  };
+}
+
+async function resolveProjectPythonBoundary(
+  reader: GitSnapshotReader,
+  configuredEntries: readonly string[] | undefined,
+): Promise<LanguageBoundaryResolution> {
+  const pythonEntries = configuredEntries?.filter((path) =>
+    path.endsWith("__init__.py"),
+  );
+  const listedEntries = await Promise.all(
+    (["base", "head"] as const).map((revision) =>
+      reader.listPythonPackageEntries(revision),
+    ),
+  );
+  const [baseBoundary, headBoundary] = await Promise.all(
+    (["base", "head"] as const).map((revision, index) =>
+      resolvePythonBoundary({
+        readFile: (path) => reader.readAt(revision, path),
+        listPackageEntries: () => Promise.resolve(listedEntries[index] ?? []),
+        snapshot: (path, source) => snapshotSource(path, source, false),
+        ...(pythonEntries === undefined || pythonEntries.length === 0
+          ? {}
+          : { configuredEntries: pythonEntries }),
+      }),
+    ),
+  );
+  return {
+    ...mergeBoundaryReports(baseBoundary, headBoundary),
+    documentationDirectories:
+      headBoundary.report.mode === "entry"
+        ? packageDirectories(headBoundary.report.entries)
+        : [],
+  };
+}
+
+function mergeBoundaryReports(
+  baseBoundary: ResolvedBoundary,
+  headBoundary: ResolvedBoundary,
+): LanguageBoundaryResolution {
+  const entryMode =
+    baseBoundary.report.mode === "entry" &&
+    headBoundary.report.mode === "entry";
+  const fallbackReport =
+    baseBoundary.report.mode === "fallback"
+      ? baseBoundary.report
+      : headBoundary.report;
+  return {
+    report: entryMode
+      ? {
+          mode: "entry",
+          entries: [
+            ...new Set([
+              ...baseBoundary.report.entries,
+              ...headBoundary.report.entries,
+            ]),
+          ].sort(compareStrings),
+          filesRead:
+            baseBoundary.report.filesRead + headBoundary.report.filesRead,
+        }
+      : {
+          mode: "fallback",
+          entries: [],
+          reason:
+            fallbackReport.mode === "fallback"
+              ? fallbackReport.reason
+              : "entry-not-found",
+          filesRead:
+            baseBoundary.report.filesRead + headBoundary.report.filesRead,
+        },
+    base: baseBoundary,
+    head: headBoundary,
+    documentationDirectories: [],
+  };
+}
+async function applyBoundary(
+  changes: SymbolChange[],
+  files: ParsedFileSnapshots[],
+  boundaryFiles: Pick<
+    ParsedFileSnapshots,
+    "status" | "beforePath" | "afterPath"
+  >[],
+  boundary: LanguageBoundaryResolution,
+  reader: GitSnapshotReader,
+  language: "typescript" | "python",
+): Promise<SymbolChange[]> {
+  if (boundary.report.mode !== "entry") return changes;
+  const paths = new Map<string, { beforePath?: string; afterPath?: string }>();
+  for (const file of files) {
+    for (const symbol of file.before?.symbols ?? []) {
+      paths.set(snapshotSymbolId(file.beforePath, symbol), {
+        beforePath: file.beforePath,
+        afterPath: file.afterPath,
+      });
+    }
+    for (const symbol of file.after?.symbols ?? []) {
+      paths.set(snapshotSymbolId(file.afterPath, symbol), {
+        beforePath: file.beforePath,
+        afterPath: file.afterPath,
+      });
+    }
+  }
+  const tagged = changes.map((change) => {
+    if (
+      change.scope !== "symbol" ||
+      change.language !== language ||
+      change.qualifiedName === undefined
+    ) {
+      return change;
+    }
+    const endpoints = [change.beforeId, change.afterId, change.id]
+      .filter((id): id is string => id !== undefined)
+      .map((id) => paths.get(id))
+      .find((value) => value !== undefined);
+    const name = rootName(change.qualifiedName);
+    const beforePath = endpoints?.beforePath ?? change.path;
+    const afterPath = endpoints?.afterPath ?? change.path;
+    const privatePythonPath =
+      language === "python" && isPrivatePythonPath(change.path);
+    const isPublic =
+      !privatePythonPath &&
+      (boundary.base.reachable.get(beforePath)?.has(name) === true ||
+        boundary.head.reachable.get(afterPath)?.has(name) === true);
+    return {
+      ...change,
+      visibility: isPublic ? ("public" as const) : ("internal" as const),
+    };
+  });
+
+  const addedOrDeletedFiles = new Set(
+    boundaryFiles
+      .filter((file) => file.status === "added" || file.status === "deleted")
+      .flatMap((file) => [file.beforePath, file.afterPath])
+      .filter((path): path is string => path !== undefined),
+  );
+  const changedSymbols = new Set(
+    tagged
+      .filter(
+        (change) =>
+          change.language === language &&
+          change.scope === "symbol" &&
+          change.qualifiedName !== undefined &&
+          (change.category === "added" ||
+            change.category === "removed" ||
+            change.category === "moved" ||
+            change.category === "contract-changed"),
+      )
+      .map((change) => `${change.path}\0${rootName(change.qualifiedName!)}`),
+  );
+  const flips = diffBoundaries(boundary.base, boundary.head).filter(
+    (flip) =>
+      !addedOrDeletedFiles.has(flip.path) &&
+      !changedSymbols.has(`${flip.path}\0${flip.localName}`),
+  );
+  const flipChanges = await snapshotBoundaryFlips(flips, reader, language);
+  return [...tagged, ...flipChanges].sort(
+    (left, right) =>
+      compareStrings(left.path, right.path) ||
+      compareStrings(left.kind, right.kind) ||
+      compareStrings(left.qualifiedName ?? "", right.qualifiedName ?? "") ||
+      compareStrings(left.category, right.category) ||
+      compareStrings(left.id, right.id),
+  );
+}
+
+async function snapshotBoundaryFlips(
+  flips: BoundaryFlip[],
+  reader: GitSnapshotReader,
+  language: "typescript" | "python",
+): Promise<SymbolChange[]> {
+  const changes: SymbolChange[] = [];
+  for (const flip of flips) {
+    const revision = flip.kind === "exposed" ? "head" : "base";
+    const source = await reader.readAt(revision, flip.path);
+    const snapshot = await snapshotSource(flip.path, source);
+    if (snapshot === undefined || snapshot.language !== language) continue;
+    for (const symbol of snapshot.symbols.filter(
+      ({ qualifiedName }) => rootName(qualifiedName) === flip.localName,
+    )) {
+      const value = {
+        scope: "symbol" as const,
+        category: flip.kind,
+        risk:
+          flip.kind === "hidden"
+            ? ("potentially-breaking" as const)
+            : ("informational" as const),
+        language: symbol.language,
+        path: flip.path,
+        kind: symbol.kind,
+        qualifiedName: symbol.qualifiedName,
+        ...(flip.kind === "exposed"
+          ? { after: symbol.signature }
+          : { before: symbol.signature }),
+        ...(symbol.arity === undefined ? {} : { arity: symbol.arity }),
+        visibility: "public" as const,
+      };
+      changes.push(createChange(value));
+    }
+  }
+  return changes;
+}
+
+function rootName(qualifiedName: string): string {
+  return qualifiedName.split(".", 1)[0]!;
+}
+
+function snapshotSymbolId(
+  path: string | undefined,
+  symbol: ParserSymbolSnapshot,
+): string {
+  return `${symbol.language}:${path ?? ""}#${symbol.kind}:${symbol.qualifiedName}`;
+}
+
+function isPrivatePythonPath(path: string): boolean {
+  return path.split("/").some((segment) => {
+    if (segment === "__init__.py" || segment === "__main__.py") return false;
+    const name = segment.endsWith(".py") ? segment.slice(0, -3) : segment;
+    return name.startsWith("_");
+  });
+}
+
+function isPythonPath(path: string | undefined): boolean {
+  return path !== undefined && path.endsWith(".py");
+}
+
+function isTypeScriptPath(path: string | undefined): boolean {
+  return (
+    path !== undefined && /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/u.test(path)
+  );
+}
+
+function isJavaScriptPath(path: string): boolean {
+  return /\.(?:js|jsx|mjs|cjs)$/u.test(path);
+}
+
 async function loadDocumentationFiles(
   root: string,
   configuredOutputDir: string,
+  configuredDocs: readonly string[] | undefined,
+  packageDocumentationDirectories: readonly string[],
   exclude: string[],
-): Promise<DocumentationFile[]> {
-  const candidates = new Set<string>(await rootMarkdownFiles(root));
-  for (const directory of ["docs", normalizeOutputDir(configuredOutputDir)]) {
-    if (directory === undefined) continue;
-    for (const path of await markdownFilesUnder(root, directory)) {
-      candidates.add(path);
+): Promise<DocumentationDiscovery> {
+  const rootCandidates = await rootMarkdownFiles(root, {
+    limit: ROOT_MARKDOWN_LIMIT,
+    exclude,
+  });
+  const budget: DocumentationCandidateBudget = {
+    paths: new Set<string>(),
+    files: new Set<string>(),
+    directories: new Map<string, "shallow" | "deep">(),
+    walkedEntries: 0,
+    limitReached: false,
+  };
+  for (const directory of [
+    "docs",
+    "doc",
+    "documentation",
+    "guide",
+    "guides",
+    normalizeOutputDir(configuredOutputDir),
+  ]) {
+    if (directory === undefined || budget.limitReached) continue;
+    await markdownFilesUnder(root, directory, exclude, budget);
+  }
+  for (const directory of [...new Set(packageDocumentationDirectories)]
+    .filter((candidate) => candidate !== ".")
+    .sort(compareStrings)) {
+    if (budget.limitReached) break;
+    await markdownFilesBeside(root, directory, exclude, budget);
+  }
+  for (const configured of [...new Set(configuredDocs ?? [])].sort(
+    compareStrings,
+  )) {
+    if (budget.limitReached) break;
+    const path = normalizeDocumentationPath(configured);
+    if (path === undefined) continue;
+    const validated = await safeExistingAbsolutePath(root, path);
+    if (validated === undefined) continue;
+    if (validated.stat.isDirectory() && !validated.stat.isSymbolicLink()) {
+      await markdownFilesUnder(root, path, exclude, budget);
+    } else if (
+      validated.stat.isFile() &&
+      !validated.stat.isSymbolicLink() &&
+      path.toLowerCase().endsWith(".md")
+    ) {
+      if (!recordDocumentationFile(path, budget)) break;
+      addDocumentationCandidate(path, exclude, budget);
     }
   }
 
+  const candidates = new Set([...rootCandidates, ...budget.paths]);
   const files: DocumentationFile[] = [];
   for (const path of [...candidates].sort(compareStrings)) {
-    if (matchesAny(path, exclude)) continue;
     const content = await readSafeDocumentationFile(root, path);
     if (content !== undefined) files.push({ path, content });
   }
-  return files;
+  return { files, limitReached: budget.limitReached };
 }
 
 /** Returns the repository-relative README path as it exists on disk, if any. */
-export async function discoverReadme(root: string): Promise<string | undefined> {
-  const files = await rootMarkdownFiles(root);
-  return files.find((file) => file.toLowerCase() === "readme.md");
+export async function discoverReadme(
+  root: string,
+): Promise<string | undefined> {
+  const files = await rootMarkdownFiles(root, {
+    limit: 1,
+    basename: "readme.md",
+    exclude: [],
+  });
+  return files[0];
 }
 
-async function rootMarkdownFiles(root: string): Promise<string[]> {
+async function rootMarkdownFiles(
+  root: string,
+  options: {
+    limit: number;
+    basename?: string;
+    exclude: string[];
+  },
+): Promise<string[]> {
   let entries;
   try {
     const rootStat = await fs.lstat(root, { bigint: true });
@@ -330,10 +784,13 @@ async function rootMarkdownFiles(root: string): Promise<string[]> {
       (entry) =>
         entry.isFile() &&
         !entry.isSymbolicLink() &&
-        (entry.name.toLowerCase() === "readme.md" ||
-          entry.name.toLowerCase() === "changelog.md") &&
-        isSafeRelativePath(entry.name),
+        entry.name.toLowerCase().endsWith(".md") &&
+        (options.basename === undefined ||
+          entry.name.toLowerCase() === options.basename) &&
+        isSafeRelativePath(entry.name) &&
+        !matchesAny(entry.name, options.exclude),
     )
+    .slice(0, options.limit)
     .map((entry) => entry.name);
 }
 
@@ -398,38 +855,149 @@ function parseDocumentationRead(value: string): string | undefined {
 async function markdownFilesUnder(
   root: string,
   directory: string,
-): Promise<string[]> {
+  exclude: string[],
+  budget: DocumentationCandidateBudget,
+): Promise<void> {
   const validated = await safeExistingAbsolutePath(root, directory);
-  if (validated === undefined) return [];
-  const { absolute } = validated;
-  const result: string[] = [];
+  if (
+    validated === undefined ||
+    !validated.stat.isDirectory() ||
+    validated.stat.isSymbolicLink()
+  ) {
+    return;
+  }
   const walk = async (current: string): Promise<void> => {
+    const currentRelative = relative(root, current).split(sep).join("/");
+    if (!claimDirectory(currentRelative, "deep", budget)) return;
     let entries;
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
     } catch {
       return;
     }
-    for (const entry of entries.sort((a, b) =>
-      compareStrings(a.name, b.name),
+    for (const entry of entries.sort((left, right) =>
+      compareStrings(left.name, right.name),
     )) {
+      if (budget.walkedEntries >= DOCUMENTATION_WALK_ENTRY_LIMIT) {
+        budget.limitReached = true;
+        return;
+      }
+      budget.walkedEntries += 1;
+      if (budget.limitReached) return;
       const child = resolve(current, entry.name);
       const childRelative = relative(root, child).split(sep).join("/");
-      if (!isSafeRelativePath(childRelative)) continue;
-      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      if (!isSafeRelativePath(childRelative) || entry.isSymbolicLink())
+        continue;
+      if (entry.isDirectory()) {
         await walk(child);
       } else if (
         entry.isFile() &&
-        !entry.isSymbolicLink() &&
         childRelative.toLowerCase().endsWith(".md")
       ) {
-        result.push(childRelative);
+        if (!recordDocumentationFile(childRelative, budget)) return;
+        addDocumentationCandidate(childRelative, exclude, budget);
       }
     }
   };
-  if (validated.stat.isDirectory() && !validated.stat.isSymbolicLink())
-    await walk(absolute);
-  return result;
+  await walk(validated.absolute);
+}
+
+async function markdownFilesBeside(
+  root: string,
+  directory: string,
+  exclude: string[],
+  budget: DocumentationCandidateBudget,
+): Promise<void> {
+  const validated = await safeExistingAbsolutePath(root, directory);
+  if (
+    validated === undefined ||
+    !validated.stat.isDirectory() ||
+    validated.stat.isSymbolicLink()
+  ) {
+    return;
+  }
+  const directoryRelative = relative(root, validated.absolute)
+    .split(sep)
+    .join("/");
+  if (!claimDirectory(directoryRelative, "shallow", budget)) return;
+  let entries;
+  try {
+    entries = await fs.readdir(validated.absolute, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries.sort((left, right) =>
+    compareStrings(left.name, right.name),
+  )) {
+    if (budget.walkedEntries >= DOCUMENTATION_WALK_ENTRY_LIMIT) {
+      budget.limitReached = true;
+      return;
+    }
+    budget.walkedEntries += 1;
+    if (budget.limitReached) return;
+    const path = posix.join(directory, entry.name);
+    if (
+      entry.isFile() &&
+      !entry.isSymbolicLink() &&
+      path.toLowerCase().endsWith(".md")
+    ) {
+      if (!recordDocumentationFile(path, budget)) return;
+      addDocumentationCandidate(path, exclude, budget);
+    }
+  }
+}
+
+function claimDirectory(
+  path: string,
+  depth: "shallow" | "deep",
+  budget: DocumentationCandidateBudget,
+): boolean {
+  const visited = budget.directories.get(path);
+  // A shallow package scan must not stop a later recursive scan of the same
+  // directory; a deep scan already covered everything a shallow one would read.
+  if (visited === depth || visited === "deep") return false;
+  if (
+    visited === undefined &&
+    budget.directories.size >= DOCUMENTATION_DISCOVERY_LIMIT
+  ) {
+    budget.limitReached = true;
+    return false;
+  }
+  budget.directories.set(path, depth);
+  return true;
+}
+
+function recordDocumentationFile(
+  path: string,
+  budget: DocumentationCandidateBudget,
+): boolean {
+  if (budget.files.has(path)) return true;
+  if (budget.files.size >= DOCUMENTATION_DISCOVERY_LIMIT) {
+    budget.limitReached = true;
+    return false;
+  }
+  budget.files.add(path);
+  return true;
+}
+
+function addDocumentationCandidate(
+  path: string,
+  exclude: string[],
+  budget: DocumentationCandidateBudget,
+): void {
+  if (!isSafeRelativePath(path) || matchesAny(path, exclude)) return;
+  budget.paths.add(path);
+}
+
+function packageDirectories(paths: readonly string[]): string[] {
+  return [...new Set(paths.map((path) => posix.dirname(path)))].sort(
+    compareStrings,
+  );
+}
+
+function normalizeDocumentationPath(value: string): string | undefined {
+  const normalized = posix.normalize(value.replaceAll("\\", "/"));
+  return isSafeRelativePath(normalized) ? normalized : undefined;
 }
 
 function normalizeOutputDir(value: string): string | undefined {

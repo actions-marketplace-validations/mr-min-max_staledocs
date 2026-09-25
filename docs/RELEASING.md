@@ -6,6 +6,39 @@ This is the maintainer procedure for publishing StaleDocs. It separates reposito
 
 Merging a release-readiness pull request does not publish a package. The release workflow runs only after a matching `v*` tag is pushed. Do not create or push a release tag without a separate explicit publication decision made after every pre-release check below passes.
 
+## 0.4.0-beta.1 record
+
+Released on 2026-09-13 through the existing OIDC workflow with no reusable npm credential or name claim.
+
+- PR A was merged and the exact merged main commit passed `npm run verify:release`, `npm run test:public-beta`, and the release-candidate verifier before tagging.
+- Annotated tag `v0.4.0-beta.1` points to `29f8aed249d88ddbbb60daaea2bf9d9b8c3d88bc`.
+- The workflow verified Node.js 22 and 24, published `staledocs@0.4.0-beta.1` with provenance, and created the GitHub prerelease.
+- The npm and GitHub tarballs are byte-identical with SHA-256 `83afe2106fd97e8fa5efba24de483f9cfda852688a8a56a409ebb53d77afe062`.
+- npm `latest`, npm `beta`, and the moving GitHub Action `v0` tag point to `0.4.0-beta.1`.
+- PR B runs the published package against the approved corpus and records the comparison in `docs/EVALUATIONS.md`.
+
+The reusable procedure remains: merge a verified release-readiness PR, pin clean main, repeat the release gates, confirm private vulnerability reporting, make a separate publication decision, push an annotated matching version tag, verify the OIDC workflow and matching artifacts, promote release channels, then record published-package evidence in a follow-up PR.
+
+The evaluation manifest holds the ten owner-approved labels. Run the old
+package with an evidence directory outside the public checkout:
+
+```bash
+node scripts/evaluate-external.mjs scripts/evaluations.json \
+  --package staledocs@0.3.0-beta.1 --evidence "$PRIVATE_OLD_EVIDENCE" --out /tmp/old.md
+```
+
+Only after publication, PR B runs:
+
+```bash
+node scripts/evaluate-external.mjs scripts/evaluations.json \
+  --evidence "$PRIVATE_NEW_EVIDENCE" --compare "$PRIVATE_OLD_EVIDENCE" \
+  --out docs/EVALUATIONS.md
+```
+
+The public output is deterministic; raw timings and command records stay in
+private evidence. Any per-label expectation regression stops the comparison
+without changing labels or replacing corpus rows.
+
 ## 0.3.0-beta.1 procedure
 
 Use the same OIDC workflow and tag `v0.3.0-beta.1`. Before publication, fetch `origin/main`, confirm the release candidate is based on that commit, run the local release gates, and confirm the tree is clean. The owner then publishes the tag through the existing OIDC workflow. After npm accepts the package, run `npm dist-tag add staledocs@0.3.0-beta.1 latest` so a pre-1.0 project whose only versions are betas makes the bare install work; the `beta` tag remains for explicitness.

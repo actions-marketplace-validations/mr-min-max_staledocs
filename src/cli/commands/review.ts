@@ -50,7 +50,7 @@ export async function createReviewReport(
     plan.base.commit ?? plan.base.label,
     plan.head.type === "working-tree"
       ? undefined
-      : plan.head.commit ?? plan.head.label,
+      : (plan.head.commit ?? plan.head.label),
     cwd,
   );
   const publicChanges = plan.changes
@@ -75,18 +75,51 @@ export async function createReviewReport(
       }),
     );
 
-  const changesById = new Map(plan.changes.map((change) => [change.id, change]));
+  const changesById = new Map(
+    plan.changes.map((change) => [change.id, change]),
+  );
   const directReferenceFiles = new Set<string>();
-  const unmapped = new Set<string>();
+  const directlyMapped = new Set<string>();
+  const mappedMemberRoots = new Set<string>();
+  const reviewImpactNames = new Map<
+    string,
+    { qualifiedName: string; kind: SymbolChange["kind"] }
+  >();
   for (const impact of plan.documentation) {
     const change = changesById.get(impact.changeId);
-    if (change?.qualifiedName === undefined) continue;
-    if (isReviewChange(change) && impact.directReferences.length === 0) {
-      unmapped.add(change.qualifiedName);
+    if (
+      change?.qualifiedName === undefined ||
+      change.visibility === "internal"
+    ) {
+      continue;
+    }
+    if (isReviewChange(change)) {
+      reviewImpactNames.set(impact.changeId, {
+        qualifiedName: change.qualifiedName,
+        kind: change.kind,
+      });
+    }
+    if (impact.directReferences.length > 0) {
+      directlyMapped.add(change.qualifiedName);
+      const separator = change.qualifiedName.indexOf(".");
+      if (separator > 0) {
+        mappedMemberRoots.add(change.qualifiedName.slice(0, separator));
+      }
     }
     for (const reference of impact.directReferences) {
       directReferenceFiles.add(reference.file);
     }
+  }
+  const unmapped = new Set<string>();
+  for (const { qualifiedName, kind } of reviewImpactNames.values()) {
+    if (directlyMapped.has(qualifiedName)) continue;
+    if (
+      (kind === "class" || kind === "interface") &&
+      mappedMemberRoots.has(qualifiedName)
+    ) {
+      continue;
+    }
+    unmapped.add(qualifiedName);
   }
 
   const documents: ReviewReportDocument[] = [];
@@ -107,9 +140,15 @@ export async function createReviewReport(
     });
   }
 
-  const breaking = publicChanges.filter((change) => change.risk === "potentially-breaking").length;
-  const staleDocuments = documents.filter((document) => document.status === "stale").length;
-  const coChangedDocuments = documents.filter((document) => document.status === "co-changed").length;
+  const breaking = publicChanges.filter(
+    (change) => change.risk === "potentially-breaking",
+  ).length;
+  const staleDocuments = documents.filter(
+    (document) => document.status === "stale",
+  ).length;
+  const coChangedDocuments = documents.filter(
+    (document) => document.status === "co-changed",
+  ).length;
   const suppressed = planning.suppressed;
   const report: ReviewReport = {
     schemaVersion: REVIEW_SCHEMA_VERSION,
@@ -122,6 +161,9 @@ export async function createReviewReport(
       coChangedDocuments,
       unmappedSymbols: unmapped.size,
       suppressed: plan.ignored.suppressed,
+      ...(plan.summary.internalChanges === undefined
+        ? {}
+        : { internalChanges: plan.summary.internalChanges }),
     },
     changes: publicChanges,
     documents,
@@ -132,6 +174,15 @@ export async function createReviewReport(
         ...(reason === undefined ? {} : { reason }),
       }))
       .sort((left, right) => compareStrings(left.symbol, right.symbol)),
+    ...(plan.boundary === undefined ? {} : { boundary: plan.boundary }),
+    ...(plan.ignored.notAnalyzed === undefined
+      ? {}
+      : {
+          notAnalyzed: plan.ignored.notAnalyzed.map(({ path, reason }) => ({
+            path,
+            reason,
+          })),
+        }),
     verdict: breaking > 0 ? "breaking" : staleDocuments > 0 ? "stale" : "clean",
   };
   return report;
@@ -168,7 +219,11 @@ export async function executeReviewCommand(
         : renderReviewText(report, maxSymbols);
   io.stdout(`${output}\n`);
   if (failOn === "breaking" && report.verdict === "breaking") return 1;
-  if (failOn === "stale" && (report.verdict === "stale" || report.verdict === "breaking")) return 1;
+  if (
+    failOn === "stale" &&
+    (report.verdict === "stale" || report.verdict === "breaking")
+  )
+    return 1;
   return 0;
 }
 
@@ -178,7 +233,11 @@ export const reviewCommand = new Command("review")
   .option("--head <ref>", "Comparison head")
   .option("--format <format>", "Output format: text, markdown, or json", "text")
   .option("--fail-on <verdict>", "Fail on none, stale, or breaking", "none")
-  .option("--max-symbols <count>", "Maximum symbols in text or Markdown output", "30")
+  .option(
+    "--max-symbols <count>",
+    "Maximum symbols in text or Markdown output",
+    "30",
+  )
   .action(async (options: ReviewCommandOptions) => {
     process.exitCode = await executeReviewCommand(options);
   });
@@ -200,8 +259,11 @@ function isReviewFailOn(value: unknown): value is ReviewFailOn {
 function isReviewChange(change: SymbolChange): boolean {
   return (
     change.scope === "symbol" &&
+    change.visibility !== "internal" &&
     (change.category === "added" ||
+      change.category === "exposed" ||
       change.category === "removed" ||
+      change.category === "hidden" ||
       change.category === "moved" ||
       change.category === "contract-changed")
   );

@@ -105,42 +105,111 @@ describe("review output", () => {
         {
           path: "README.md",
           status: "stale",
-          sections: [
-            { section: "API", slug: "api", symbols: ["createUser"] },
-          ],
+          sections: [{ section: "API", slug: "api", symbols: ["createUser"] }],
         },
       ],
       unmapped: ["helperExport"],
     });
 
     expect(renderReviewMarkdown(full)).toBe(
-      '<!-- staledocs-review -->\n' +
-        '### StaleDocs: documentation impact\n\n' +
-        '**3 public API changes**, 1 potentially breaking. **2 documentation sections** mention changed symbols and were not updated in this PR.\n\n' +
-        '| Symbol | Change | Before | After |\n' +
-        '| --- | --- | --- | --- |\n' +
-        '| `createUser` | parameters (breaking) | `createUser(email: string): string` | `createUser(email: string, role: string): string` |\n' +
-        '| `UserService.create` | parameters | `create(email: string): Promise<string>` | `create(email: string, role: string): Promise<string>` |\n' +
-        '| `helperExport` | added |  | `helperExport(): void` |\n\n' +
-        '**Needs a documentation update**\n' +
-        '- `README.md` > API: `createUser`\n' +
-        '- `docs/API.md` > createUser: `UserService.create`, `createUser`\n\n' +
-        '**Updated in this PR**\n' +
-        '- `CHANGELOG.md`\n\n' +
-        '**Not mentioned in any documentation:** `helperExport`\n\n' +
+      "<!-- staledocs-review -->\n" +
+        "### StaleDocs: documentation impact\n\n" +
+        "**3 public API changes**, 1 potentially breaking. **2 documentation sections** mention changed symbols and were not updated in this PR.\n\n" +
+        "| Symbol | Change | Before | After |\n" +
+        "| --- | --- | --- | --- |\n" +
+        "| `createUser` | parameters (breaking) | `createUser(email: string): string` | `createUser(email: string, role: string): string` |\n" +
+        "| `UserService.create` | parameters | `create(email: string): Promise<string>` | `create(email: string, role: string): Promise<string>` |\n" +
+        "| `helperExport` | added |  | `helperExport(): void` |\n\n" +
+        "**Needs a documentation update**\n" +
+        "- `README.md` > API: `createUser`\n" +
+        "- `docs/API.md` > createUser: `UserService.create`, `createUser`\n\n" +
+        "**Updated in this PR**\n" +
+        "- `CHANGELOG.md`\n\n" +
+        "**Not mentioned in any documentation:** `helperExport`\n\n" +
         '<sub>Deterministic AST analysis; no model was used. Suppress a symbol with `.staledocsignore`. <a href="https://github.com/mr-min-max/staledocs">StaleDocs</a></sub>',
     );
   });
 
   it("uses the exact compact zero-change comment", () => {
-    expect(renderReviewMarkdown(report({
-      summary: { ...report().summary, publicApiChanges: 0, breaking: 0 },
-      changes: [],
-      documents: [],
-      verdict: "clean",
-    }))).toBe(
+    expect(
+      renderReviewMarkdown(
+        report({
+          summary: { ...report().summary, publicApiChanges: 0, breaking: 0 },
+          changes: [],
+          documents: [],
+          verdict: "clean",
+        }),
+      ),
+    ).toBe(
       "<!-- staledocs-review -->\n### StaleDocs: documentation impact\nNo public API changes in this pull request.",
     );
+  });
+
+  it("renders bounded not-analyzed details in every report format", () => {
+    const notAnalyzed = [
+      { path: "lib/request.js", reason: "commonjs" },
+      { path: "tools/check.rb", reason: "unsupported" },
+    ];
+    const zero = renderReviewMarkdown(
+      report({
+        summary: { ...report().summary, publicApiChanges: 0, breaking: 0 },
+        changes: [],
+        documents: [],
+        notAnalyzed,
+        verdict: "clean",
+      }),
+    );
+    const changed = renderReviewMarkdown(report({ notAnalyzed }));
+    const text = renderReviewText(report({ notAnalyzed }));
+    const truncated = renderReviewMarkdown(
+      report({
+        summary: { ...report().summary, publicApiChanges: 0, breaking: 0 },
+        changes: [],
+        documents: [],
+        notAnalyzed: Array.from({ length: 6 }, (_, index) => ({
+          path: `unsupported/${index}.txt`,
+          reason: "unsupported",
+        })),
+        verdict: "clean",
+      }),
+    );
+
+    expect(zero).toContain(
+      "No public API changes in the analyzed files. Not analyzed: `lib/request.js` (CommonJS), `tools/check.rb` (unsupported file type).",
+    );
+    expect(changed).toContain(
+      "**Not analyzed:** `lib/request.js` (CommonJS), `tools/check.rb` (unsupported file type)",
+    );
+    expect(text).toContain(
+      "Not analyzed: lib/request.js (CommonJS), tools/check.rb (unsupported file type)",
+    );
+    expect(truncated).toContain(
+      "`unsupported/4.txt` (unsupported file type), +1 more.",
+    );
+    expect(truncated).not.toContain("unsupported/5.txt");
+    expect(
+      JSON.parse(serializeReviewReport(report({ notAnalyzed }))).notAnalyzed,
+    ).toEqual(notAnalyzed);
+  });
+
+  it("renders a kept members-only row without duplicate signatures", () => {
+    const rendered = renderReviewMarkdown(
+      report({
+        changes: [
+          {
+            ...report().changes[0],
+            qualifiedName: "Client",
+            kind: "class",
+            risk: "review-required",
+            before: "class Client",
+            after: "class Client",
+            changedContractFacets: ["members"],
+          },
+        ],
+      }),
+    );
+
+    expect(rendered).toContain("| `Client` | members changed |  |  |");
   });
 
   it("escapes pipes, sorts changes, and truncates the changes table", () => {
@@ -209,8 +278,82 @@ describe("review output", () => {
     expect(rendered.match(/\+1 more/gu)).toHaveLength(3);
   });
 
+  it("renders entry and fallback boundary details in Markdown and text", () => {
+    const entry = report({
+      summary: { ...report().summary, internalChanges: 2 },
+      boundary: {
+        typescript: {
+          mode: "entry",
+          entries: ["src/index.ts"],
+          filesRead: 12,
+        },
+      },
+    });
+    const fallback = report({
+      summary: { ...report().summary, publicApiChanges: 0, breaking: 0 },
+      changes: [],
+      documents: [],
+      verdict: "clean",
+      boundary: {
+        typescript: {
+          mode: "fallback",
+          entries: [],
+          reason: "no-manifest",
+          filesRead: 0,
+        },
+      },
+    });
+
+    expect(renderReviewMarkdown(entry)).toContain(
+      "Public boundary (TypeScript): `src/index.ts`. 2 internal changes not shown.",
+    );
+    expect(renderReviewText(entry)).toContain(
+      "Public boundary (TypeScript): `src/index.ts`. 2 internal changes not shown.",
+    );
+    expect(renderReviewMarkdown(fallback)).toContain(
+      "Public boundary (TypeScript): not resolved (no-manifest); every export is treated as public.",
+    );
+  });
+
+  it("renders public boundary flip labels", () => {
+    const exposed = {
+      ...report().changes[0],
+      category: "exposed" as const,
+      risk: "informational" as const,
+      before: undefined,
+      after: "createUser(email: string): string",
+    };
+    const hidden = {
+      ...report().changes[0],
+      category: "hidden" as const,
+      risk: "potentially-breaking" as const,
+      before: "createUser(email: string): string",
+      after: undefined,
+    };
+
+    const markdown = renderReviewMarkdown(
+      report({
+        summary: { ...report().summary, publicApiChanges: 2 },
+        changes: [exposed, hidden],
+      }),
+    );
+    const text = renderReviewText(
+      report({
+        summary: { ...report().summary, publicApiChanges: 2 },
+        changes: [exposed, hidden],
+      }),
+    );
+
+    expect(markdown).toContain("now exported");
+    expect(markdown).toContain("no longer exported (breaking)");
+    expect(text).toContain("now exported");
+    expect(text).toContain("no longer exported (breaking)");
+  });
+
   it("renders text without a Markdown table and canonical JSON", () => {
     expect(renderReviewText(report())).not.toContain("| Symbol |");
-    expect(JSON.parse(serializeReviewReport(report())).schemaVersion).toBe("aidoc.review.v1");
+    expect(JSON.parse(serializeReviewReport(report())).schemaVersion).toBe(
+      "aidoc.review.v1",
+    );
   });
 });

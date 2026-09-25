@@ -5,6 +5,7 @@ import type {
   ContractFacet,
   DocumentationImpact,
   ImpactSummary,
+  ImpactPlan,
   ParserModuleSnapshot,
   ParserSymbolSnapshot,
   SnapshotDescriptor,
@@ -21,9 +22,11 @@ export interface ParsedFileSnapshots {
 
 const CATEGORY_ORDER: readonly ChangeCategory[] = [
   "removed",
+  "hidden",
   "contract-changed",
   "moved",
   "added",
+  "exposed",
   "dependency-changed",
   "implementation-changed",
   "documentation-changed",
@@ -35,7 +38,9 @@ const CATEGORY_PRIORITY = new Map(
 
 const ALL_CATEGORIES: readonly ChangeCategory[] = [
   "added",
+  "exposed",
   "removed",
+  "hidden",
   "moved",
   "contract-changed",
   "implementation-changed",
@@ -154,7 +159,37 @@ export function compareSnapshots(files: ParsedFileSnapshots[]): SymbolChange[] {
       );
     }
   }
-  return changes.sort(compareImpactChanges);
+  return foldRedundantMemberChanges(changes).sort(compareImpactChanges);
+}
+
+function foldRedundantMemberChanges(changes: SymbolChange[]): SymbolChange[] {
+  const rootsWithMethodChanges = new Set(
+    changes.flatMap((change) => {
+      if (
+        change.scope !== "symbol" ||
+        change.kind !== "method" ||
+        change.qualifiedName === undefined
+      ) {
+        return [];
+      }
+      const separator = change.qualifiedName.indexOf(".");
+      return separator < 0
+        ? []
+        : [`${change.path}\0${change.qualifiedName.slice(0, separator)}`];
+    }),
+  );
+  return changes.filter(
+    (change) =>
+      !(
+        change.scope === "symbol" &&
+        (change.kind === "class" || change.kind === "interface") &&
+        change.category === "contract-changed" &&
+        change.changedContractFacets?.length === 1 &&
+        change.changedContractFacets[0] === "members" &&
+        change.qualifiedName !== undefined &&
+        rootsWithMethodChanges.has(`${change.path}\0${change.qualifiedName}`)
+      ),
+  );
 }
 
 /**
@@ -175,16 +210,37 @@ export function summarizeImpact(
   let reviewRequired = 0;
   let informational = 0;
   let publicApiChanges = 0;
+  let internalChanges = 0;
+  let hasVisibility = false;
+  const publicChangeIds = new Set<string>();
   for (const change of changes) {
     byCategory[change.category] += 1;
+    if (change.visibility !== undefined) hasVisibility = true;
     if (
+      change.visibility === "internal" &&
       change.scope === "symbol" &&
       (change.category === "added" ||
+        change.category === "exposed" ||
         change.category === "removed" ||
+        change.category === "hidden" ||
         change.category === "contract-changed" ||
         change.category === "moved")
-    )
+    ) {
+      internalChanges += 1;
+    }
+    if (
+      change.scope === "symbol" &&
+      change.visibility !== "internal" &&
+      (change.category === "added" ||
+        change.category === "exposed" ||
+        change.category === "removed" ||
+        change.category === "hidden" ||
+        change.category === "contract-changed" ||
+        change.category === "moved")
+    ) {
       publicApiChanges += 1;
+    }
+    if (change.visibility !== "internal") publicChangeIds.add(change.id);
     if (change.risk === "potentially-breaking") potentiallyBreaking += 1;
     else if (change.risk === "review-required") reviewRequired += 1;
     else informational += 1;
@@ -195,8 +251,11 @@ export function summarizeImpact(
     potentiallyBreaking,
     reviewRequired,
     informational,
-    unmapped: documentation.filter((impact) => impact.unmapped).length,
+    unmapped: documentation.filter(
+      (impact) => impact.unmapped && publicChangeIds.has(impact.changeId),
+    ).length,
     byCategory,
+    ...(hasVisibility ? { internalChanges } : {}),
   };
 }
 
@@ -212,7 +271,7 @@ export function digestImpactPayload(input: {
   summary: ImpactSummary;
   changes: SymbolChange[];
   documentation: DocumentationImpact[];
-  ignored: { unsupported: number; excluded: number; suppressed: number };
+  ignored: ImpactPlan["ignored"];
 }): string {
   return sha256Hex(
     canonicalStringify({
@@ -322,7 +381,7 @@ function addOne(
   );
 }
 
-function createChange(
+export function createChange(
   value: Omit<SymbolChange, "id" | "digest"> & { id?: string },
 ): SymbolChange {
   const id =

@@ -23,7 +23,9 @@ export type ContractFacet =
   | "modifiers";
 export type ChangeCategory =
   | "added"
+  | "exposed"
   | "removed"
+  | "hidden"
   | "moved"
   | "contract-changed"
   | "implementation-changed"
@@ -33,6 +35,14 @@ export type ChangeRisk =
   | "potentially-breaking"
   | "review-required"
   | "informational";
+export type SymbolVisibility = "public" | "internal";
+
+export interface ReexportEdge {
+  /** Module specifier as written, relative specifiers only. */
+  specifier: string;
+  /** Undefined means `export * from`; otherwise consumer-visible and local names. */
+  names?: { exported: string; local: string }[];
+}
 
 export interface SnapshotDescriptor {
   type: "git" | "working-tree";
@@ -58,6 +68,8 @@ export interface SymbolChange {
   after?: string;
   /** Callable arity at the head revision, or at the base revision when removed. */
   arity?: { required: number; total: number };
+  /** Reachability through the package boundary, when one was resolved. */
+  visibility?: SymbolVisibility;
   digest: string;
 }
 
@@ -90,6 +102,8 @@ export interface ImpactSummary {
   informational: number;
   unmapped: number;
   byCategory: Record<ChangeCategory, number>;
+  /** Changes hidden because they are unreachable from a resolved entry. */
+  internalChanges?: number;
 }
 
 export interface ContextBudgetReport {
@@ -100,6 +114,22 @@ export interface ContextBudgetReport {
   omittedRecords: number;
   impactDigest: string;
 }
+export interface LanguageBoundaryReport {
+  mode: "entry" | "fallback";
+  entries: string[];
+  reason?:
+    | "no-manifest"
+    | "no-entry-field"
+    | "entry-not-found"
+    | "unsupported-entry"
+    | "limit-exceeded";
+  filesRead: number;
+}
+
+export interface BoundaryReport {
+  typescript?: LanguageBoundaryReport;
+  python?: LanguageBoundaryReport;
+}
 
 export interface ImpactPlan {
   schemaVersion: typeof IMPACT_PLAN_SCHEMA_VERSION;
@@ -109,7 +139,17 @@ export interface ImpactPlan {
   changes: SymbolChange[];
   documentation: DocumentationImpact[];
   context: ContextBudgetReport;
-  ignored: { unsupported: number; excluded: number; suppressed: number };
+  ignored: {
+    unsupported: number;
+    excluded: number;
+    suppressed: number;
+    notAnalyzed?: {
+      path: string;
+      reason: "commonjs" | "unsupported";
+    }[];
+    documentationLimitReached?: boolean;
+  };
+  boundary?: BoundaryReport;
   digest: string;
 }
 
@@ -188,6 +228,14 @@ export interface ParserModuleSnapshot {
   language: ImpactLanguage;
   dependencyFingerprint: string;
   symbols: ParserSymbolSnapshot[];
+  /** Static relative re-exports. */
+  reexports?: ReexportEdge[];
+  /** Static Python `__all__`, when it is a literal string list or tuple. */
+  dunderAll?: string[];
+  /** Consumer export names mapped to parser symbol roots. */
+  exports?: { exported: string; symbol: string }[];
+  /** JavaScript or TypeScript module syntax detected through the AST. */
+  moduleSystem?: "esm" | "commonjs" | "none";
 }
 
 export interface ParserSymbolSnapshot {
@@ -202,6 +250,8 @@ export interface ParserSymbolSnapshot {
   contractFingerprint: string;
   implementationFingerprint: string;
   documentationFingerprint: string | null;
+  /** Set by the planner after boundary resolution; parsers leave it undefined. */
+  visibility?: SymbolVisibility;
 }
 
 const PLAN_FAILURE_PAYLOADS = new WeakMap<object, Readonly<PlanError>>();

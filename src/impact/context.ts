@@ -21,17 +21,21 @@ import {
 
 const CATEGORY_PRIORITY: Readonly<Record<ChangeCategory, number>> = {
   removed: 0,
-  "contract-changed": 1,
-  moved: 2,
-  added: 3,
-  "dependency-changed": 4,
-  "implementation-changed": 5,
-  "documentation-changed": 6,
+  hidden: 1,
+  "contract-changed": 2,
+  moved: 3,
+  added: 4,
+  exposed: 5,
+  "dependency-changed": 6,
+  "implementation-changed": 7,
+  "documentation-changed": 8,
 };
 
 const CATEGORIES: readonly ChangeCategory[] = [
   "added",
+  "exposed",
   "removed",
+  "hidden",
   "moved",
   "contract-changed",
   "implementation-changed",
@@ -272,6 +276,7 @@ function compareContextChanges(
 function projectChangeCandidate(
   change: SymbolChange,
 ): ProjectedChangeCandidate | undefined {
+  if (change.visibility === "internal") return undefined;
   try {
     if (typeof change !== "object" || change === null) return undefined;
 
@@ -385,6 +390,9 @@ function projectSummary(summary: ImpactSummary): ImpactSummary {
       informational: requireCount(summary.informational),
       unmapped: requireCount(summary.unmapped),
       byCategory,
+      ...(summary.internalChanges === undefined
+        ? {}
+        : { internalChanges: requireCount(summary.internalChanges) }),
     };
   } catch (error) {
     if (PlanFailure.read(error) !== undefined) throw error;

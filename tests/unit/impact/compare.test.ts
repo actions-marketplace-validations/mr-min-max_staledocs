@@ -213,6 +213,51 @@ describe("impact snapshot comparison", () => {
     });
   });
 
+  it("folds a class members row when a public method changes", async () => {
+    const parser = new TypeScriptParser();
+    const before = await parser.snapshot(
+      "src/client.ts",
+      "export class Client { get(url: string): string { return url; } }",
+    );
+    const after = await parser.snapshot(
+      "src/client.ts",
+      "export class Client { get(url: string, init: RequestInit): string { return url; } }",
+    );
+
+    const changes = compareSnapshots([
+      file("modified", before, after, "src/client.ts", "src/client.ts"),
+    ]);
+
+    expect(changes.map(({ qualifiedName }) => qualifiedName)).toEqual([
+      "Client.get",
+    ]);
+  });
+
+  it("keeps a class members row when no public method changes", async () => {
+    const parser = new TypeScriptParser();
+    const before = await parser.snapshot(
+      "src/client.ts",
+      "export class Client {}",
+    );
+    const after = await parser.snapshot(
+      "src/client.ts",
+      "export class Client { value = 1; }",
+    );
+
+    const changes = compareSnapshots([
+      file("modified", before, after, "src/client.ts", "src/client.ts"),
+    ]);
+
+    expect(changes).toEqual([
+      expect.objectContaining({
+        qualifiedName: "Client",
+        kind: "class",
+        category: "contract-changed",
+        changedContractFacets: ["members"],
+      }),
+    ]);
+  });
+
   it("propagates signatures and callable arity by change category", () => {
     const beforeContract = symbol("contract", {
       signature: "contract(value?: string): void",
@@ -369,13 +414,69 @@ describe("impact snapshot comparison", () => {
       unmapped: 1,
       byCategory: {
         added: 1,
+        exposed: 0,
         removed: 1,
+        hidden: 0,
         moved: 0,
         "contract-changed": 0,
         "implementation-changed": 0,
         "documentation-changed": 0,
         "dependency-changed": 0,
       },
+    });
+  });
+
+  it("counts internal visibility without changing fallback behavior", () => {
+    const changes = compareSnapshots([
+      file(
+        "added",
+        undefined,
+        module("src/api.ts", [symbol("publicApi"), symbol("internalApi")]),
+        undefined,
+        "src/api.ts",
+      ),
+    ]);
+    changes[0].visibility = "internal";
+    changes[1].visibility = "public";
+    const documentation: DocumentationImpact[] = changes.map((change) => ({
+      changeId: change.id,
+      directReferences: [],
+      recommendations: [],
+      unmapped: true,
+    }));
+
+    expect(summarizeImpact(changes, documentation)).toMatchObject({
+      publicApiChanges: 1,
+      internalChanges: 1,
+      unmapped: 1,
+    });
+    for (const change of changes) delete change.visibility;
+    expect(summarizeImpact(changes, documentation)).toMatchObject({
+      publicApiChanges: 2,
+      unmapped: 2,
+    });
+    expect(
+      summarizeImpact(changes, documentation).internalChanges,
+    ).toBeUndefined();
+  });
+
+  it("does not count informational internal records in the hidden headline", () => {
+    const change = compareSnapshots([
+      file(
+        "modified",
+        module("src/api.ts", [symbol("internal")]),
+        module("src/api.ts", [
+          symbol("internal", { implementationFingerprint: hash("1") }),
+        ]),
+        "src/api.ts",
+        "src/api.ts",
+      ),
+    ])[0];
+    change.visibility = "internal";
+
+    expect(summarizeImpact([change])).toMatchObject({
+      publicApiChanges: 0,
+      internalChanges: 0,
     });
   });
 
